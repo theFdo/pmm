@@ -20,7 +20,9 @@ and operator visibility that never interferes with critical execution paths.
 - Data inputs: Binance (price/bars), Polymarket Gamma (discovery/metadata), Polymarket CLOB (book and later execution-facing market data).
 
 Binance input sources are mandatory:
-- Live high-frequency midprice input: Binance orderbook websocket channels.
+- Live high-frequency input: Binance orderbook websocket channels, used for both:
+  - high-frequency midprice updates, and
+  - continuous construction of sealed 1s klines to keep model-input sequences up to date.
 - Historical bar files for training and cold-start cache: Binance data portal monthly and daily 1s klines (e.g. `https://data.binance.vision/?prefix=data/spot/monthly/klines/BTCUSDT/1s/` and corresponding daily path).
 - Recent past-hours synchronization: Binance API.
 
@@ -36,9 +38,10 @@ Hard rule:
 - Single-writer state reducers; readers consume snapshots.
 - Explicit mock-vs-live visibility.
 - Fail degraded, not invisible: missing upstream data should not silently drop required visibility.
-- No duplicated logic or unnecessary redefinitions anywhere (DRY policy).
+- Minimize custom data-structure definitions: prefer reusing existing SDK/library types directly instead of creating local subset structs.
+- Logic duplication is not allowed; shared logic must be implemented once and reused.
 - Probability derivation logic must be implemented once and reused everywhere.
-- Market metadata structures must come from SDK/library types and be reused across modules; do not redefine metadata models locally.
+- Use official SDK/library types and clients wherever possible (especially Polymarket SDK paths); avoid local redefinitions when SDK coverage exists.
 
 ## 2) Dashboard Spec
 
@@ -160,6 +163,8 @@ Execution ordering requirement:
 - Every jump must run sequentially with no intentional delay stage between steps, i.e. next-step code flow.
 
 ### 4.2 Dist semantics
+- Model inference must run every 1 second.
+- Each 1-second inference cycle produces the dist update candidate for that cycle.
 - Dist batch is all-or-nothing.
 - Partial invalid batch must be rejected.
 
@@ -224,49 +229,102 @@ No divergent math paths.
 
 ## 6) Implementation Spec
 
-### 6.1 Phase order (high level)
-1. Contracts and shared reducers/stores.
-2. Discovery + dashboard visibility.
-3. Binance price + 1s bars + feature builder.
-4. Dist batch + probs + action triggers.
-5. PM top-of-book ingestion.
-6. Positions/offers + net profit.
-7. Execution/routing functional integration.
+### 6.1 Step-by-step plan (small contained steps)
+1. Slug Generation
+- Implement: deterministic slug builder for `5m/15m/1h/4h` (including 1h NY DST rule and 4h offset).
+- Check: unit tests with exact expected slugs.
 
-### 6.2 End-of-phase gate (mandatory)
-Before moving to next phase:
-1. Unit tests green.
-2. Integration tests green.
-3. Dashboard running and manually reviewed in browser.
-4. Mock/live markings validated.
-5. Regression notes captured.
+2. Discovery Resolution (SDK-first)
+- Implement: batch slug resolution via Polymarket Rust SDK, using SDK metadata types as source objects.
+- Check: integration test for found and unresolved slugs; unresolved rows remain visible.
 
-### 6.3 Testing requirements
-Unit:
-- slug generation (all durations/coins)
-- 4h offset behavior
-- formatter behavior
-- probability boundaries
+3. Dashboard Core Table
+- Implement: one-table dashboard with required columns and market link.
+- Check: manual browser validation that all columns render.
 
-Integration:
-- slug batch resolution and hydration
-- placeholder behavior on resolve miss
-- trigger paths:
-  - price -> probs -> action_eval
-  - dist -> probs -> action_eval
-  - book -> action_eval
+4. Dashboard Logic Pack
+- Implement: checkbox filters (`coin/duration/bets_open/in_interval`), `in_interval` rule (`start <= now < end`), formatting rules.
+- Check: UI logic tests + manual checks on filter behavior and boundary times.
 
-E2E functional:
-- end-to-end functional correctness: all required paths run, outputs are produced, and no stage is silently skipped
-- dashboard on/off must not break or stall the execution pipeline
+5. Contract Freeze Checkpoint
+- Implement: freeze current event names, required fields, and `mock_columns` semantics used by discovery/dashboard.
+- Check: contract tests and schema compatibility checks pass before moving forward.
 
-### 6.4 Order proposal and scope-control rules
-- One implementation step at a time, phase aligned.
-- Prefer simplest working design; avoid premature abstractions.
-- Do not implement future-phase features early unless required by current phase.
-- Keep placeholders explicit and marked.
+6. Global Logging Baseline
+- Implement: cross-module logging baseline early, with enough context for end-to-end debugging.
+- Check: smoke checks for key lifecycle, error, and degraded-state events.
 
-### 6.5 Operational requirements
+7. Mock Visibility
+- Implement: strict mock-field marking using `mock_columns`.
+- Check: tests for highlighted vs non-highlighted columns.
+
+8. Historical Klines Loader
+- Implement: loader for Binance monthly/daily 1s kline files.
+- Check: parser tests + fixture load test per coin pair.
+
+9. Shared Bars-to-Features Transform
+- Implement: one shared transform for training and runtime cold-start.
+- Check: deterministic tests (`same input -> same features`) + schema/version check.
+
+10. Model Training Pipeline
+- Implement: offline training pipeline using historical klines and the shared bars-to-features transform; produce a model artifact.
+- Check: training script runs end-to-end and emits a valid artifact.
+
+11. Live Binance WS Transport Reliability
+- Implement: Binance websocket connection lifecycle (connect/reconnect, stream continuity checks, degraded flags).
+- Check: integration tests for reconnect and continuity behavior.
+
+12. Live Binance WS Reducers (Midprice + 1s Klines)
+- Implement: reducers consuming WS updates to produce midprice updates and continuous sealed 1s klines.
+- Check: integration tests confirming both outputs from the same WS flow.
+
+13. Cold-Start Readiness Gate
+- Implement: readiness gating so inference/action paths are not enabled until sequence state is initialized from historical+recent data.
+- Check: readiness tests for pre/post warmup transitions.
+
+14. Atomic Dist Batch Path
+- Implement: 1-second inference cycle wiring plus all-coins/all-durations dist commit path with reject-on-partial-invalid.
+- Check: unit tests for commit/reject and previous-valid-state retention, and cadence check for 1-second inference updates.
+
+15. Probability Recompute Wiring
+- Implement: recompute probabilities on price and dist updates using shared probability functions.
+- Check: integration tests for `price -> prob` and `dist -> prob`.
+
+16. Sequential Jump Enforcement
+- Implement: enforce no intentional delay between jumps for all defined execution paths.
+- Check: integration assertions for jump order across active path transitions.
+
+17. PM Top-of-Book Ingest
+- Implement: YES best bid/ask ingest via SDK path.
+- Check: integration test + dashboard book columns live.
+
+18. Degraded-Mode Action Rules
+- Implement: explicit behavior when required inputs are stale/missing so action flow is safe and predictable.
+- Check: integration tests for degraded input combinations and expected action suppression behavior.
+
+19. Action Eval Triggering (Single-Market)
+- Implement: trigger evaluation from price/dist/book updates at single-market granularity.
+- Check: integration tests for each trigger source.
+
+20. Global Send Flag
+- Implement: runtime flag controlling real external send vs suppressed send.
+- Check: tests verifying actions still compute while external send is blocked.
+
+21. Logging Completeness Pass
+- Implement: finalize logging coverage across all active modules and path jumps.
+- Check: integration checks for end-to-end traceability across discovery/price/dist/prob/eval/send.
+
+22. Functional E2E Gate
+- Implement: end-to-end run for current scope.
+- Check: all required paths execute, outputs are produced, no stage is silently skipped, and dashboard does not stall the pipeline.
+
+### 6.2 Step gate rule
+Before moving to the next step:
+1. Step checks pass.
+2. Scope remains contained (no future-phase design choices unless required).
+3. If UI-visible, dashboard is run and manually validated in browser.
+
+### 6.3 Operational requirements
 - Health endpoints must be available.
 - Discovery failure degrades gracefully with deterministic placeholders.
 - Dashboard failures do not disrupt engine loop.
@@ -276,13 +334,13 @@ E2E functional:
   - one script to run `engine` + `dashboard` together
   - one script to train the model
 
-### 6.6 Logging requirements (high-level)
+### 6.4 Logging requirements (high-level)
 - Logging must be global across all modules.
 - Logs must contain enough data to identify and analyze useful events end-to-end.
 - Logging design must prioritize clear traceability of decisions, actions, failures, and degraded states.
 - The spec does not lock implementation details (format, backend, or specific library choices).
 
-### 6.7 Not Implemented Yet (Explicitly Out of Current Scope)
+### 6.5 Not Implemented Yet (Explicitly Out of Current Scope)
 The following capabilities are explicitly deferred and must not be treated as phase-complete requirements yet:
 - Polymarket past-trades analysis for baseline binary cross-entropy evaluation.
 - Full replay capacity.
