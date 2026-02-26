@@ -14,6 +14,11 @@ This crate currently implements:
 - Duplicate slugs are deduplicated for fetch efficiency and then re-expanded.
 - Missing markets become `Unresolved(NotFound)`; transport issues become `Unresolved(TransportError)`.
 - Rows are never silently dropped.
+- Interval scheduling is deterministic with `previous`, `active`, and `next` windows:
+  - `5m`: rollover at `:00/:05/:10/...`
+  - `15m`: rollover at `:00/:15/:30/:45`
+  - `1h`: rollover at every `hh:00`
+  - `4h`: same modulo logic, shifted by `SlugConfig.discovery_offset_4h_min` (e.g. `60` => `01:00/05:00/09:00/...` UTC)
 
 ## Build and test
 Run default unit tests (no network):
@@ -27,5 +32,6 @@ Run live Gamma integration test (network required):
 
 ```bash
 . "$HOME/.cargo/env"
+# optional: export PMFLIPS_DISCOVERY_OFFSET_4H_MIN=60
 cargo test --features live-gamma-tests --test discovery_live_gamma
 ```
