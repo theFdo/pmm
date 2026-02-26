@@ -1,4 +1,4 @@
-# PMM Core (Steps 1-4, 6, 8)
+# PMM Core (Steps 1-4, 6, 8, 9)
 
 This crate currently implements:
 - Step 1: deterministic Polymarket slug generation for `5m`, `15m`, `1h`, `4h`, `1d`
@@ -7,6 +7,7 @@ This crate currently implements:
 - Step 4: dashboard logic pack (filters, in-interval recompute, formatting, 250ms polling)
 - Step 6: global structured logging baseline for control-plane lifecycle/discovery/http paths
 - Step 8: historical Binance 1s kline loader (planner + downloader + parser + coverage report)
+- Step 9: shared bars-to-features transform (deterministic schema + fingerprint + gap policy)
 
 ## Step 1 behavior
 - Interval scheduling is aligned to `America/New_York` wall-clock boundaries.
@@ -163,4 +164,43 @@ PMM_KLINE_START_DATE=2025-01-01 \
 PMM_BINANCE_DATA_ROOT=data/binance \
 PMM_BINANCE_STORE_PATH=data/binance/klines_1s.sqlite \
 cargo run --bin binance_store_sync
+```
+
+## Shared Bars-to-Features Transform (Step 9)
+- Input source: combined Step 8 SQLite store (`klines_1s`) over `[start, end)` range.
+- Output: deterministic `FeatureSchema` + `Vec<FeatureRow>` + `FeatureTransformReport`.
+- Supported per-symbol feature families (`BTC/ETH/SOL/XRP`):
+  - `ret_1s`, `ret_w`, `range_w`, `vol_w`, `quote_vol_w`
+- Global time feature:
+  - `tow_sin`, `tow_cos`
+- Gap policies:
+  - `Strict` (default): fail immediately on first continuity/incomplete frame issue.
+  - `ReportAndSkip`: skip invalid frames/ranges and report explicit gap metadata.
+- Compatibility helpers:
+  - `FEATURE_SCHEMA_VERSION`
+  - deterministic schema fingerprint
+  - `assert_schema_compatible(...)`
+
+Example usage sketch:
+
+```rust
+use std::path::Path;
+use pmm::{
+    transform_store_range, FeatureTransformConfig, FeatureTransformRequest, GapPolicy,
+};
+
+let req = FeatureTransformRequest {
+    start_ts_ms_utc: 1_735_689_600_000,
+    end_ts_ms_utc_exclusive: 1_735_693_200_000,
+};
+let cfg = FeatureTransformConfig {
+    windows_seconds: vec![5, 15, 60],
+    max_duration_seconds: 86_400,
+    gap_policy: GapPolicy::Strict,
+    ..FeatureTransformConfig::default()
+};
+
+let (_schema, rows, report) = transform_store_range(Path::new("data/binance/klines_1s.sqlite"), &req, &cfg)?;
+println!("rows={} skipped={}", rows.len(), report.skipped_points);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```

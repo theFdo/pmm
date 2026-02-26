@@ -452,3 +452,123 @@ Step 8 is complete only when all are true:
 3. Gap policy: `allow + report`.
 4. Time axis is UTC milliseconds.
 5. Only `1s` interval archives are in scope.
+
+---
+
+## Step 9 (Validation Scope): Shared Bars-to-Features Transform
+
+This step adds one shared deterministic bars-to-features transform for both training prep and runtime cold-start paths.
+
+### Objective
+Build and validate a shared transform that:
+1. Reads aligned `1s` klines for `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `XRPUSDT` from the Step 8 combined SQLite store.
+2. Produces deterministic feature rows at `1s` cadence.
+3. Exposes explicit schema version + fingerprint for compatibility checks.
+4. Reuses one transform code path for training/runtime wrappers.
+
+### Out of Scope
+1. Model training/artifact production (Step 10).
+2. Websocket transport/reducer implementation (Steps 11-12).
+3. Readiness gates and execution wiring (Step 13+).
+4. Trading/action logic coupling.
+
+### Functional Requirements
+1. Shared module + API:
+- `src/features.rs`
+- no duplicate transform math in binaries/tests
+
+2. Input contract:
+- read from `klines_1s` table in combined store
+- process range `[start_ts_ms_utc, end_ts_ms_utc_exclusive)`
+
+3. Determinism:
+- stable row ordering by timestamp ascending
+- stable column ordering from schema builder
+- same input + config => same schema fingerprint and output rows
+
+4. Feature families (`f64`, v1):
+- per symbol:
+  - `ret_1s = ln(close_t / close_{t-1})`
+  - `ret_w = ln(close_t / close_{t-w})`
+  - `range_w = ln(max_high_w / min_low_w)`
+  - `vol_w = stddev(ret_1s over w)`
+  - `quote_vol_w = ln(1 + sum(quote_asset_volume_w))`
+- global:
+  - `tow_sin`, `tow_cos`
+- shared helper:
+  - `horizon_conditioning(horizon_seconds, max_duration_seconds)`
+
+5. Gap behavior:
+- enforce 1-second monotonic continuity and all-4-symbol completeness
+- `GapPolicy::Strict`: fail on first continuity/incomplete-frame issue
+- `GapPolicy::ReportAndSkip`: continue, reset rolling window segment, and report gaps
+
+6. Schema/version compatibility:
+- explicit `FEATURE_SCHEMA_VERSION`
+- deterministic schema fingerprint from ordered columns + transform params
+- compatibility assertion helper for future training/runtime gates
+
+7. Observability:
+- `features.schema.built`
+- `features.transform.start`
+- `features.transform.gap_detected`
+- `features.transform.finish`
+
+### Public API Additions
+1. `FeatureTransformConfig`
+2. `FeatureTransformRequest`
+3. `GapPolicy`
+4. `FeatureDType`
+5. `FeatureColumn`
+6. `FeatureSchema`
+7. `FeatureRow`
+8. `FeatureTransformReport`
+9. `HorizonConditioning`
+10. `FeatureError`
+11. `FEATURE_SCHEMA_VERSION`
+12. `build_feature_schema(cfg) -> FeatureSchema`
+13. `transform_store_range(store_path, req, cfg) -> Result<(FeatureSchema, Vec<FeatureRow>, FeatureTransformReport), FeatureError>`
+14. `transform_store_range_for_training(...) -> ...`
+15. `transform_store_range_for_runtime_cold_start(...) -> ...`
+16. `horizon_conditioning(...) -> HorizonConditioning`
+17. `assert_schema_compatible(expected_version, expected_fingerprint, actual_schema) -> Result<(), FeatureError>`
+
+### Validation Plan (must pass before Step 10)
+1. Unit tests:
+- schema order and deterministic fingerprint
+- `horizon_conditioning` numeric correctness
+- known-value math checks for feature families
+- warm-up behavior with windowed features
+
+2. Integration tests:
+- temp SQLite store transform with all 4 symbols aligned
+- deterministic repeat run equality
+- strict-mode incomplete frame failure
+- strict-mode continuity gap failure
+- report-and-skip mode returns rows + explicit gap report
+
+3. Contract-style tests:
+- schema compatibility pass/fail on version/fingerprint mismatch
+- training/runtime wrappers return identical output for same input/config
+
+### Acceptance Criteria
+Step 9 is complete only when all are true:
+1. One shared transform implementation powers both wrappers.
+2. Schema version + fingerprint are deterministic and test-covered.
+3. Gaps are explicit and policy-controlled (strict vs report-and-skip).
+4. Time-of-week encoding and horizon-conditioning helpers are implemented.
+5. Unit + integration tests pass.
+6. README and implementation docs are updated.
+
+### Deliverables
+1. `src/features.rs` shared transform module.
+2. `src/lib.rs` Step 9 exports.
+3. `tests/features_transform.rs` deterministic/gap/compatibility coverage.
+4. Documentation updates in `README.md` and this file.
+
+### Assumptions and Defaults
+1. Step 7 remains skipped by explicit decision.
+2. Input cadence is `1s` UTC milliseconds.
+3. Default gap policy is `Strict`.
+4. Default max duration is `86400` seconds.
+5. V1 feature dtype is `f64`.

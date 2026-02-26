@@ -8,6 +8,7 @@
 mod binance_klines;
 mod dashboard;
 mod discovery;
+mod features;
 mod observability;
 mod slug;
 
@@ -35,6 +36,13 @@ pub use discovery::{
 #[cfg(feature = "discovery-sdk")]
 pub use discovery::{resolve_discovery_batch, SdkMarket};
 
+pub use features::{
+    assert_schema_compatible, build_feature_schema, horizon_conditioning, transform_store_range,
+    transform_store_range_for_runtime_cold_start, transform_store_range_for_training,
+    FeatureColumn, FeatureDType, FeatureError, FeatureRow, FeatureSchema, FeatureTransformConfig,
+    FeatureTransformReport, FeatureTransformRequest, GapPolicy, HorizonConditioning,
+    FEATURE_SCHEMA_VERSION,
+};
 pub use observability::{
     init_logging, log_app_bind, log_app_start, log_source_selected, logging_config_from_env,
     LogFormat, LoggingConfig, LoggingInitError,
