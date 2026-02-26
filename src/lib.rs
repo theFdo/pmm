@@ -3,12 +3,19 @@
 //! Current implemented scope:
 //! - Step 1: deterministic slug generation
 //! - Step 2: discovery-resolution data model and batch mapping flow
+//! - Step 8: historical Binance 1s kline loading
 
+mod binance_klines;
 mod dashboard;
 mod discovery;
 mod observability;
 mod slug;
 
+pub use binance_klines::{
+    load_1s_klines, plan_required_archives, sync_archives, ArchiveKind, ArchiveRef, BinanceSymbol,
+    HistoricalKlinesConfig, Kline1s, KlineCoverageReport, KlineLoadError, KlineLoadRequest,
+    KlineLoadResult, LocalArchive, LocalArchiveSource,
+};
 pub use dashboard::{
     apply_filters, build_display_snapshot, compute_in_interval, dashboard_router, demo_snapshot,
     format_row_for_display, market_link, render_dashboard_html, BetsOpenFilter,

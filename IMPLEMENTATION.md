@@ -339,3 +339,116 @@ Step 6 is complete only when all are true:
 2. Default local format is `pretty`; CI/reliability runs can use `json`.
 3. Discovery refresh cadence remains current, and logging must stay lightweight.
 4. Event names above are baseline vocabulary for future steps.
+
+---
+
+## Step 8 (Validation Scope): Historical Klines Loader (Downloader Included)
+
+This step skips Step 7 (by explicit decision) and adds historical Binance `1s` kline ingestion for offline/runtime cold-start inputs.
+
+### Objective
+Implement a production-ready historical `1s` loader for:
+1. `BTCUSDT`
+2. `ETHUSDT`
+3. `SOLUSDT`
+4. `XRPUSDT`
+
+with deterministic archive planning, downloader/cache behavior, archive parsing, and explicit coverage reporting.
+
+### Out of Scope
+1. Live websocket ingestion/reconnect.
+2. Recent-hours REST synchronization.
+3. Bars-to-features transform (Step 9).
+4. Model training/inference wiring.
+
+### Functional Requirements
+1. Deterministic archive planning:
+- monthly path: `.../monthly/klines/{SYMBOL}/1s/{SYMBOL}-1s-YYYY-MM.zip`
+- daily path: `.../daily/klines/{SYMBOL}/1s/{SYMBOL}-1s-YYYY-MM-DD.zip`
+- full months use monthly archives
+- partial boundary months use daily archives
+
+2. Downloader behavior:
+- write to local cache under `data_root/{SYMBOL}/1s/{monthly|daily}/`
+- atomic writes (`.tmp` then rename)
+- retry with exponential backoff
+- optional checksum verification (`.CHECKSUM`)
+- checksum-valid cached files are reused
+
+3. Parser behavior:
+- parse first CSV entry from ZIP archive
+- enforce Binance kline schema and numeric parsing
+- keep only rows in requested `[start, end)` interval
+- sort ascending by `open_time_ms`
+- dedupe by `open_time_ms` (first kept deterministically)
+
+4. Coverage/gap behavior:
+- canonical step size: `1000ms`
+- include explicit report fields:
+  - `expected_points`
+  - `actual_points`
+  - `missing_points`
+  - `duplicate_points_removed`
+  - `gap_ranges` (bounded)
+  - `total_gap_ranges`
+- no gap imputation; loader succeeds with `allow + report`
+
+5. Observability:
+- emit structured events:
+  - `binance.sync.start`
+  - `binance.sync.file.cached`
+  - `binance.sync.file.downloaded`
+  - `binance.sync.file.checksum_failed`
+  - `binance.load.finish`
+  - `binance.load.gap_detected`
+
+### Public API Additions
+1. `BinanceSymbol`
+2. `Kline1s`
+3. `KlineLoadRequest`
+4. `KlineCoverageReport`
+5. `KlineLoadResult`
+6. `HistoricalKlinesConfig`
+7. `plan_required_archives(req) -> Vec<ArchiveRef>`
+8. `sync_archives(req, cfg) -> Result<Vec<LocalArchive>, KlineLoadError>`
+9. `load_1s_klines(req, cfg) -> Result<KlineLoadResult, KlineLoadError>`
+
+### Validation Plan (must pass before Step 9)
+1. Unit tests:
+- archive planning across month boundaries
+- kline CSV schema/field parsing
+- duplicate + gap coverage calculations
+- checksum mismatch rejection when verification is enabled
+
+2. Integration tests:
+- fixture load test per symbol (`BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `XRPUSDT`)
+- monthly+daily stitch behavior with overlap dedupe
+- coverage report correctness for missing timestamps
+- cache-hit sync behavior without network
+
+3. Optional live smoke:
+- feature-gated network test for one known Binance archive
+- ignored by default
+
+### Acceptance Criteria
+Step 8 is complete only when all are true:
+1. Loader supports all four required symbols.
+2. Monthly/daily planning is deterministic.
+3. Downloader cache + checksum behavior is implemented.
+4. Parsed outputs are filtered, sorted, deduped.
+5. Missing timestamps are visible via explicit coverage report.
+6. Fixture/integration tests pass without external network.
+7. README and implementation docs describe Step 8 behavior.
+
+### Deliverables
+1. `src/binance_klines.rs` module.
+2. `lib.rs` exports for Step 8 public API.
+3. Fixture and integration tests for loader behavior.
+4. Documentation updates in `README.md` and this file.
+
+### Assumptions and Defaults
+1. Step 7 remains skipped intentionally.
+2. Step 8 includes downloader implementation now.
+3. Gap policy: `allow + report`.
+4. Time axis is UTC milliseconds.
+5. Only `1s` interval archives are in scope.
