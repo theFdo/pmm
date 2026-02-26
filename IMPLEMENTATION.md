@@ -135,3 +135,120 @@ Step 2 is complete only when all are true:
 3. No unresolved row suppression is possible via resolver output.
 4. Unit tests for mapping logic pass.
 5. Live Gamma integration test is available and feature-gated.
+
+---
+
+## Step 3 (Validation Scope): Dashboard Core Table
+
+This step converts section **6.1 / Step 3** and dashboard requirements from section **2** in `FULL_SPEC.md` into a contained deliverable.
+
+### Objective
+Build and validate a browser-visible dashboard core table that:
+1. Renders exactly one page with exactly one large table (no ladder view).
+2. Shows all required columns from `FULL_SPEC.md` section 2.5.
+3. Includes a clickable market `Link` derived from slug.
+4. Keeps unresolved markets visible in table rows (no silent suppression).
+
+### Out of Scope (Step 3 only)
+1. Checkbox filters (`coin/duration/bets_open/in_interval`) and filter logic.
+2. Formatting polish rules (significant digits, percent format, etc.).
+3. `mock_columns` visual highlighting behavior.
+4. Shared-memory IPC integration (use pluggable source, mock default now).
+5. Trading/evaluation logic and any execution-path coupling.
+
+### Functional Requirements
+1. **UI/Server shape**
+- Rust HTTP server with SSR HTML page at `/dashboard`.
+- Single table component only.
+- Optional JSON snapshot endpoint for diagnostics (read-only).
+
+2. **Snapshot source abstraction**
+- Define a dashboard snapshot reader interface (trait) with read-only fetch:
+  - `snapshot() -> DashboardSnapshot`
+- Provide in-memory mock implementation for Step 3 manual validation.
+- Keep interface ready to swap with shared-memory provider later.
+
+3. **Row model and required columns**
+- Table rows must render these 22 columns in order:
+  1. `Link`
+  2. `Coin`
+  3. `Duration`
+  4. `Bets Open`
+  5. `In Interval`
+  6. `End` (`hh:mm`)
+  7. `Midprice`
+  8. `Best Bid YES`
+  9. `Best Ask YES`
+  10. `Position Net` (`size@price@YES|NO`)
+  11. `Pos YES` (`size@price`)
+  12. `Pos NO` (`size@price`)
+  13. `Offer YES` (`size@price`)
+  14. `Offer NO` (`size@price`)
+  15. `Net Profit`
+  16. `Fee %`
+  17. `Reward %`
+  18. `P_finished`
+  19. `P_running`
+  20. `P_next`
+  21. `dist1(mu,sigma,nu,lambda)`
+  22. `dist2(mu,sigma,nu,lambda)`
+
+4. **Link behavior**
+- `Link` uses slug-based URL: `https://polymarket.com/event/{slug}`.
+- Link text should be human-usable (slug or compact label), clickable in browser.
+
+5. **Missing/unresolved behavior**
+- If market is unresolved or field unavailable, row still renders.
+- Unavailable cells use placeholder (`-`) for this step.
+- No row dropping due to missing metadata.
+
+6. **Control-plane isolation**
+- Dashboard is read-only and isolated from execution path.
+- Failures in dashboard render/path must not mutate discovery state.
+
+### Important API / Interface Additions
+1. `DashboardSnapshot` (table-level payload for current render cycle).
+2. `DashboardRow` (one row with all required table fields, allowing missing values).
+3. `DashboardSnapshotSource` trait (read-only data access abstraction).
+4. HTTP route contracts:
+- `GET /dashboard` -> SSR HTML page with single table.
+- Optional `GET /dashboard/snapshot` -> JSON snapshot for debugging/manual checks.
+
+### Validation Plan (must pass before Step 4)
+1. **Unit tests**
+- Header order and exact column count (22) are correct.
+- Row-to-cell mapping fills all columns.
+- Unresolved row remains visible and uses placeholders.
+- Link generation from slug matches expected URL format.
+
+2. **Integration tests**
+- `GET /dashboard` returns HTTP 200 and includes table + required headers.
+- Rendering with mixed resolved/unresolved rows still returns full row count.
+- Mock snapshot source wiring works end-to-end.
+
+3. **Manual browser checks**
+- Open dashboard in browser.
+- Confirm one page, one table, no ladder view.
+- Confirm all required columns appear.
+- Confirm link click opens expected Polymarket event URL pattern.
+
+### Acceptance Criteria
+Step 3 is complete only when all are true:
+1. Dashboard serves a single-page, single-table view.
+2. All 22 required columns are present in required order.
+3. Market `Link` column is clickable and slug-derived.
+4. Unresolved rows remain visible (not suppressed).
+5. Automated unit/integration checks pass.
+6. Manual browser validation confirms table renders correctly.
+
+### Deliverables
+1. Step 3 section added to `IMPLEMENTATION.md` with the above scope/checks.
+2. Dashboard core-table implementation plan locked to Rust SSR + pluggable snapshot source.
+3. Explicit test checklist for automated + manual validation.
+4. Clear boundary between Step 3 and Step 4 responsibilities.
+
+### Assumptions and Defaults
+1. Use mock in-memory snapshot provider for Step 3 unless shared-memory reader already exists.
+2. Default unresolved cell placeholder is `-` in Step 3.
+3. Link source is slug (not token-id URL) for this step.
+4. Dashboard refresh/perf tuning beyond simple render correctness is deferred until later dashboard logic/optimization steps.

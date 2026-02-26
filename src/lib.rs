@@ -4,14 +4,19 @@
 //! - Step 1: deterministic slug generation
 //! - Step 2: discovery-resolution data model and batch mapping flow
 
+mod dashboard;
 mod discovery;
 mod slug;
 
+pub use dashboard::{
+    dashboard_router, demo_snapshot, market_link, render_dashboard_html, DashboardRow,
+    DashboardSnapshot, DashboardSnapshotSource, InMemoryMockSnapshotSource, DASHBOARD_HEADERS,
+};
 pub use discovery::resolve_discovery_batch_with_fetcher;
 pub use discovery::{
     build_active_and_next_discovery_keys, build_active_discovery_keys,
-    build_previous_active_and_next_discovery_keys, interval_ends_for_now, DiscoveryConfig,
-    DiscoveryError, DiscoveryKey, DiscoveryRow, DiscoveryStatus, DiscoveryWindow, IntervalEnds,
+    build_previous_active_and_next_discovery_keys, interval_starts_for_now, DiscoveryConfig,
+    DiscoveryError, DiscoveryKey, DiscoveryRow, DiscoveryStatus, DiscoveryWindow, IntervalStarts,
     ScheduledDiscoveryKey, SlugFetchOutcome, UnresolvedReason, ALL_COINS, ALL_DURATIONS,
 };
 #[cfg(feature = "discovery-sdk")]

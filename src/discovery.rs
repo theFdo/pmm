@@ -10,7 +10,7 @@ use crate::{build_slug, Coin, Duration, SlugConfig, SlugError};
 pub struct DiscoveryKey {
     pub coin: Coin,
     pub duration: Duration,
-    pub end_ts_utc: i64,
+    pub start_ts_utc: i64,
     pub slug: String,
 }
 
@@ -18,27 +18,27 @@ impl DiscoveryKey {
     pub fn new(
         coin: Coin,
         duration: Duration,
-        end_ts_utc: i64,
+        start_ts_utc: i64,
         slug_cfg: SlugConfig,
     ) -> Result<Self, SlugError> {
         Ok(Self {
             coin,
             duration,
-            end_ts_utc,
-            slug: build_slug(coin, duration, end_ts_utc, slug_cfg)?,
+            start_ts_utc,
+            slug: build_slug(coin, duration, start_ts_utc, slug_cfg)?,
         })
     }
 
     pub fn from_slug(
         coin: Coin,
         duration: Duration,
-        end_ts_utc: i64,
+        start_ts_utc: i64,
         slug: impl Into<String>,
     ) -> Self {
         Self {
             coin,
             duration,
-            end_ts_utc,
+            start_ts_utc,
             slug: slug.into(),
         }
     }
@@ -115,17 +115,17 @@ pub struct ScheduledDiscoveryKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IntervalEnds {
-    pub previous_end_ts_utc: i64,
-    pub active_end_ts_utc: i64,
-    pub next_end_ts_utc: i64,
+pub struct IntervalStarts {
+    pub previous_start_ts_utc: i64,
+    pub active_start_ts_utc: i64,
+    pub next_start_ts_utc: i64,
 }
 
-pub fn interval_ends_for_now(
+pub fn interval_starts_for_now(
     duration: Duration,
     now_ts_utc: i64,
     slug_cfg: SlugConfig,
-) -> IntervalEnds {
+) -> IntervalStarts {
     let step = duration_step_seconds(duration);
     let offset = interval_offset_seconds(duration, slug_cfg);
     let aligned_base = now_ts_utc.saturating_sub(offset);
@@ -133,14 +133,13 @@ pub fn interval_ends_for_now(
         .div_euclid(step)
         .saturating_mul(step)
         .saturating_add(offset);
-    let previous_end_ts_utc = active_start;
-    let active_end_ts_utc = active_start.saturating_add(step);
-    let next_end_ts_utc = active_end_ts_utc.saturating_add(step);
+    let previous_start_ts_utc = active_start.saturating_sub(step);
+    let next_start_ts_utc = active_start.saturating_add(step);
 
-    IntervalEnds {
-        previous_end_ts_utc,
-        active_end_ts_utc,
-        next_end_ts_utc,
+    IntervalStarts {
+        previous_start_ts_utc,
+        active_start_ts_utc: active_start,
+        next_start_ts_utc,
     }
 }
 
@@ -153,12 +152,12 @@ pub fn build_active_discovery_keys(
     let mut keys = Vec::with_capacity(coins.len() * durations.len());
 
     for duration in durations {
-        let ends = interval_ends_for_now(*duration, now_ts_utc, slug_cfg);
+        let starts = interval_starts_for_now(*duration, now_ts_utc, slug_cfg);
         for coin in coins {
             keys.push(DiscoveryKey::new(
                 *coin,
                 *duration,
-                ends.active_end_ts_utc,
+                starts.active_start_ts_utc,
                 slug_cfg,
             )?);
         }
@@ -197,19 +196,19 @@ pub fn build_previous_active_and_next_discovery_keys(
     let mut keys = Vec::with_capacity(coins.len() * durations.len() * 3);
 
     for duration in durations {
-        let ends = interval_ends_for_now(*duration, now_ts_utc, slug_cfg);
+        let starts = interval_starts_for_now(*duration, now_ts_utc, slug_cfg);
         for coin in coins {
             keys.push(ScheduledDiscoveryKey {
                 window: DiscoveryWindow::Previous,
-                key: DiscoveryKey::new(*coin, *duration, ends.previous_end_ts_utc, slug_cfg)?,
+                key: DiscoveryKey::new(*coin, *duration, starts.previous_start_ts_utc, slug_cfg)?,
             });
             keys.push(ScheduledDiscoveryKey {
                 window: DiscoveryWindow::Active,
-                key: DiscoveryKey::new(*coin, *duration, ends.active_end_ts_utc, slug_cfg)?,
+                key: DiscoveryKey::new(*coin, *duration, starts.active_start_ts_utc, slug_cfg)?,
             });
             keys.push(ScheduledDiscoveryKey {
                 window: DiscoveryWindow::Next,
-                key: DiscoveryKey::new(*coin, *duration, ends.next_end_ts_utc, slug_cfg)?,
+                key: DiscoveryKey::new(*coin, *duration, starts.next_start_ts_utc, slug_cfg)?,
             });
         }
     }
@@ -560,57 +559,57 @@ mod tests {
     }
 
     #[test]
-    fn interval_5m_boundary_rolls_to_next_end() {
+    fn interval_5m_boundary_rolls_to_next_start() {
         // 2025-01-01 00:05:00 UTC
         let now = 1_735_689_900;
-        let ends = interval_ends_for_now(Duration::M5, now, SlugConfig::default());
-        assert_eq!(ends.previous_end_ts_utc, 1_735_689_900); // 00:05
-        assert_eq!(ends.active_end_ts_utc, 1_735_690_200); // 00:10
-        assert_eq!(ends.next_end_ts_utc, 1_735_690_500); // 00:15
+        let starts = interval_starts_for_now(Duration::M5, now, SlugConfig::default());
+        assert_eq!(starts.previous_start_ts_utc, 1_735_689_600); // 00:00
+        assert_eq!(starts.active_start_ts_utc, 1_735_689_900); // 00:05
+        assert_eq!(starts.next_start_ts_utc, 1_735_690_200); // 00:10
     }
 
     #[test]
-    fn interval_15m_boundary_rolls_to_next_end() {
+    fn interval_15m_boundary_rolls_to_next_start() {
         // 2025-01-01 00:15:00 UTC
         let now = 1_735_690_500;
-        let ends = interval_ends_for_now(Duration::M15, now, SlugConfig::default());
-        assert_eq!(ends.previous_end_ts_utc, 1_735_690_500); // 00:15
-        assert_eq!(ends.active_end_ts_utc, 1_735_691_400); // 00:30
-        assert_eq!(ends.next_end_ts_utc, 1_735_692_300); // 00:45
+        let starts = interval_starts_for_now(Duration::M15, now, SlugConfig::default());
+        assert_eq!(starts.previous_start_ts_utc, 1_735_689_600); // 00:00
+        assert_eq!(starts.active_start_ts_utc, 1_735_690_500); // 00:15
+        assert_eq!(starts.next_start_ts_utc, 1_735_691_400); // 00:30
     }
 
     #[test]
-    fn interval_1h_boundary_rolls_to_next_hour_end() {
+    fn interval_1h_boundary_rolls_to_next_hour_start() {
         // 2025-01-01 13:00:00 UTC
         let now = 1_735_736_400;
-        let ends = interval_ends_for_now(Duration::H1, now, SlugConfig::default());
-        assert_eq!(ends.previous_end_ts_utc, 1_735_736_400); // 13:00
-        assert_eq!(ends.active_end_ts_utc, 1_735_740_000); // 14:00
-        assert_eq!(ends.next_end_ts_utc, 1_735_743_600); // 15:00
+        let starts = interval_starts_for_now(Duration::H1, now, SlugConfig::default());
+        assert_eq!(starts.previous_start_ts_utc, 1_735_732_800); // 12:00
+        assert_eq!(starts.active_start_ts_utc, 1_735_736_400); // 13:00
+        assert_eq!(starts.next_start_ts_utc, 1_735_740_000); // 14:00
     }
 
     #[test]
-    fn interval_4h_respects_offset_for_active_and_next() {
+    fn interval_4h_respects_offset_for_previous_active_and_next_start() {
         let cfg = SlugConfig {
             discovery_offset_4h_min: 60,
         };
         // 2025-01-01 00:30:00 UTC, 4h boundaries are 01:00, 05:00, ...
         let now = 1_735_691_400;
-        let ends = interval_ends_for_now(Duration::H4, now, cfg);
-        assert_eq!(ends.previous_end_ts_utc, 1_735_678_800); // 2024-12-31 21:00
-        assert_eq!(ends.active_end_ts_utc, 1_735_693_200); // 01:00
-        assert_eq!(ends.next_end_ts_utc, 1_735_707_600); // 05:00
+        let starts = interval_starts_for_now(Duration::H4, now, cfg);
+        assert_eq!(starts.previous_start_ts_utc, 1_735_664_400); // 2024-12-31 17:00
+        assert_eq!(starts.active_start_ts_utc, 1_735_678_800); // 2024-12-31 21:00
+        assert_eq!(starts.next_start_ts_utc, 1_735_693_200); // 2025-01-01 01:00
     }
 
     #[test]
-    fn active_discovery_keys_use_current_active_interval_end() {
+    fn active_discovery_keys_use_current_active_interval_start() {
         let now = 1_735_689_900; // 2025-01-01 00:05:00 UTC
         let keys =
             build_active_discovery_keys(now, &ALL_COINS, &[Duration::M5], SlugConfig::default())
                 .unwrap();
         assert_eq!(keys.len(), ALL_COINS.len());
-        assert_eq!(keys[0].end_ts_utc, 1_735_690_200); // 00:10
-        assert_eq!(keys[0].slug, "btc-updown-5m-1735690200");
+        assert_eq!(keys[0].start_ts_utc, 1_735_689_900); // 00:05
+        assert_eq!(keys[0].slug, "btc-updown-5m-1735689900");
     }
 
     #[test]
