@@ -252,3 +252,90 @@ Step 3 is complete only when all are true:
 2. Default unresolved cell placeholder is `-` in Step 3.
 3. Link source is slug (not token-id URL) for this step.
 4. Dashboard refresh/perf tuning beyond simple render correctness is deferred until later dashboard logic/optimization steps.
+
+---
+
+## Step 6 (Validation Scope): Global Logging Baseline (Control-Plane First)
+
+This step skips Step 5 (contract freeze) and adds a shared structured logging baseline across `dashboard_server`, `dashboard`, `discovery`, and `slug`-adjacent control-plane flows.
+
+### Objective
+Implement logging that is:
+1. Structured and machine-readable.
+2. Consistent across modules.
+3. Useful for end-to-end control-plane debugging (`startup -> discovery cycle -> snapshot render`).
+4. Low-noise by default, with higher-detail opt-in.
+
+### Out of Scope
+1. Execution-path logging (engine/send path).
+2. Metrics backend (`prometheus`/OTel exporter).
+3. Contract freeze/schema gate.
+4. Distributed tracing across processes.
+
+### Functional Requirements
+1. Add shared observability module:
+- `src/observability.rs`
+- `LoggingConfig { level, format, include_target }`
+- `LogFormat = Json | Pretty`
+- `init_logging(&LoggingConfig) -> Result<(), LoggingInitError>`
+- `logging_config_from_env() -> LoggingConfig`
+
+2. Environment contract:
+- `PMM_LOG_LEVEL` (default `info`)
+- `PMM_LOG_FORMAT` (`pretty|json`, default `pretty`)
+- `PMM_LOG_TARGET` (`true|false`, default `true`)
+
+3. Stable event naming baseline:
+- `app.start`
+- `app.bind`
+- `source.selected`
+- `discovery.cycle.start`
+- `discovery.cycle.finish`
+- `discovery.resolve.error`
+- `discovery.degraded.row_transport`
+- `discovery.degraded.batch_transport`
+- `http.dashboard.request`
+- `http.snapshot.request`
+
+4. Logging behavior:
+- Replace runtime `println!/eprintln!` with `tracing` macros.
+- Include context fields for cycle/request/degraded summaries.
+- `info`: lifecycle + cycle summaries + high-signal errors.
+- `debug`: row-level transport degraded events.
+
+### Validation Plan (must pass before next step)
+1. Unit tests:
+- parse `PMM_LOG_FORMAT` and fallback behavior.
+- parse `PMM_LOG_LEVEL` and defaulting behavior.
+- `logging_config_from_env` deterministic behavior.
+
+2. Logging smoke tests:
+- startup emits `app.start`, `source.selected`, `app.bind`.
+- snapshot request emits `http.snapshot.request`.
+- simulated discovery transport error emits `discovery.resolve.error` and `discovery.degraded.batch_transport`.
+- row transport degraded emits `discovery.degraded.row_transport` at debug level.
+
+3. Manual checks:
+- run with `PMM_LOG_FORMAT=json PMM_LOG_LEVEL=info`.
+- verify cycle summary visibility without row-level spam.
+- verify degraded scenarios are visible and explicit.
+
+### Acceptance Criteria
+Step 6 is complete only when all are true:
+1. Shared observability setup is used by all current control-plane modules.
+2. No operational `println!/eprintln!` remain in runtime paths.
+3. Lifecycle/error/degraded events are visible at info/error levels.
+4. Debug level adds row-level degraded visibility without changing info noise profile.
+5. Logging smoke tests pass and README documents env usage.
+
+### Deliverables
+1. Step 6 section in `IMPLEMENTATION.md`.
+2. New observability module with env-configurable logging initialization.
+3. Structured logging in server + dashboard + discovery control-plane paths.
+4. Automated logging smoke tests and documentation updates.
+
+### Assumptions and Defaults
+1. Step 5 is skipped; log field sets are best-effort stable (not schema-frozen yet).
+2. Default local format is `pretty`; CI/reliability runs can use `json`.
+3. Discovery refresh cadence remains current, and logging must stay lightweight.
+4. Event names above are baseline vocabulary for future steps.

@@ -6,6 +6,7 @@
 
 mod dashboard;
 mod discovery;
+mod observability;
 mod slug;
 
 pub use dashboard::{
@@ -27,4 +28,8 @@ pub use discovery::{
 #[cfg(feature = "discovery-sdk")]
 pub use discovery::{resolve_discovery_batch, SdkMarket};
 
+pub use observability::{
+    init_logging, log_app_bind, log_app_start, log_source_selected, logging_config_from_env,
+    LogFormat, LoggingConfig, LoggingInitError,
+};
 pub use slug::{build_slug, parse_coin, parse_duration, Coin, Duration, SlugConfig, SlugError};

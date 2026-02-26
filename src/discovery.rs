@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Datelike, Days, TimeZone, Timelike, Utc};
 use chrono_tz::America::New_York;
 use thiserror::Error;
+use tracing::{debug, error, warn};
 
 use crate::{build_slug, Coin, Duration, SlugConfig, SlugError};
 
@@ -347,7 +348,25 @@ where
         HashMap::with_capacity(unique_slugs.len());
 
     for chunk in unique_slugs.chunks(cfg.batch_size) {
-        let fetched = fetcher(chunk)?;
+        let fetched = match fetcher(chunk) {
+            Ok(fetched) => fetched,
+            Err(err) => {
+                error!(
+                    component = "discovery",
+                    event = "discovery.resolve.error",
+                    chunk_size = chunk.len(),
+                    key_count = keys.len(),
+                    error = %err
+                );
+                warn!(
+                    component = "discovery",
+                    event = "discovery.degraded.batch_transport",
+                    key_count = keys.len(),
+                    reason = %err
+                );
+                return Err(err);
+            }
+        };
         for slug in chunk {
             let outcome = fetched
                 .get(slug)
@@ -355,6 +374,19 @@ where
                 .unwrap_or(SlugFetchOutcome::Missing);
             slug_outcomes.insert(slug.clone(), outcome);
         }
+    }
+
+    emit_transport_row_logs(keys, &slug_outcomes);
+    let has_non_transport = slug_outcomes
+        .values()
+        .any(|outcome| !matches!(outcome, SlugFetchOutcome::TransportError(_)));
+    if !keys.is_empty() && !has_non_transport {
+        warn!(
+            component = "discovery",
+            event = "discovery.degraded.batch_transport",
+            key_count = keys.len(),
+            reason = "all slug lookups returned transport errors"
+        );
     }
 
     Ok(materialize_rows(keys, &slug_outcomes))
@@ -399,6 +431,44 @@ fn materialize_rows<M: Clone>(
         .collect()
 }
 
+fn emit_transport_row_logs<M>(
+    keys: &[DiscoveryKey],
+    slug_outcomes: &HashMap<String, SlugFetchOutcome<M>>,
+) {
+    for key in keys {
+        if let Some(SlugFetchOutcome::TransportError(reason)) = slug_outcomes.get(&key.slug) {
+            debug!(
+                component = "discovery",
+                event = "discovery.degraded.row_transport",
+                slug = %key.slug,
+                coin = %coin_code(key.coin),
+                duration = %duration_code(key.duration),
+                window_start_ts_utc = key.start_ts_utc,
+                reason = %reason
+            );
+        }
+    }
+}
+
+fn coin_code(coin: Coin) -> &'static str {
+    match coin {
+        Coin::Btc => "BTC",
+        Coin::Eth => "ETH",
+        Coin::Sol => "SOL",
+        Coin::Xrp => "XRP",
+    }
+}
+
+fn duration_code(duration: Duration) -> &'static str {
+    match duration {
+        Duration::M5 => "5m",
+        Duration::M15 => "15m",
+        Duration::H1 => "1h",
+        Duration::H4 => "4h",
+        Duration::D1 => "1d",
+    }
+}
+
 #[cfg(feature = "discovery-sdk")]
 pub type SdkMarket = polymarket_client_sdk::gamma::types::response::Market;
 
@@ -425,13 +495,26 @@ pub async fn resolve_discovery_batch(
         }
     }
 
+    emit_transport_row_logs(keys, &slug_outcomes);
+
     let has_non_transport = slug_outcomes
         .values()
         .any(|outcome| !matches!(outcome, SlugFetchOutcome::TransportError(_)));
     if !keys.is_empty() && !has_non_transport {
-        return Err(DiscoveryError::Transport(
-            "all slug lookups failed with transport errors".to_string(),
-        ));
+        let reason = "all slug lookups failed with transport errors".to_string();
+        error!(
+            component = "discovery",
+            event = "discovery.resolve.error",
+            key_count = keys.len(),
+            error = %reason
+        );
+        warn!(
+            component = "discovery",
+            event = "discovery.degraded.batch_transport",
+            key_count = keys.len(),
+            reason = %reason
+        );
+        return Err(DiscoveryError::Transport(reason));
     }
 
     Ok(materialize_rows(keys, &slug_outcomes))
@@ -465,15 +548,33 @@ async fn fetch_market_by_slug_with_retry(
             Ok(Err(err)) if is_not_found_error(&err) => return SlugFetchOutcome::Missing,
             Ok(Err(err)) => {
                 if attempt >= cfg.max_retries {
-                    return SlugFetchOutcome::TransportError(err.to_string());
+                    let message = err.to_string();
+                    error!(
+                        component = "discovery",
+                        event = "discovery.resolve.error",
+                        slug = slug,
+                        attempt,
+                        max_retries = cfg.max_retries,
+                        error = %message
+                    );
+                    return SlugFetchOutcome::TransportError(message);
                 }
             }
             Err(_) => {
                 if attempt >= cfg.max_retries {
-                    return SlugFetchOutcome::TransportError(format!(
+                    let message = format!(
                         "timeout after {}ms while resolving slug {}",
                         cfg.timeout_ms, slug
-                    ));
+                    );
+                    error!(
+                        component = "discovery",
+                        event = "discovery.resolve.error",
+                        slug = slug,
+                        attempt,
+                        max_retries = cfg.max_retries,
+                        error = %message
+                    );
+                    return SlugFetchOutcome::TransportError(message);
                 }
             }
         }

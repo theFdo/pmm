@@ -1,10 +1,11 @@
-# PMM Core (Steps 1-4)
+# PMM Core (Steps 1-4, 6)
 
 This crate currently implements:
 - Step 1: deterministic Polymarket slug generation for `5m`, `15m`, `1h`, `4h`, `1d`
 - Step 2: discovery-resolution row model with explicit `Resolved` vs `Unresolved` status
 - Step 3: SSR dashboard core table with the current required columns
 - Step 4: dashboard logic pack (filters, in-interval recompute, formatting, 250ms polling)
+- Step 6: global structured logging baseline for control-plane lifecycle/discovery/http paths
 
 ## Step 1 behavior
 - Interval scheduling is aligned to `America/New_York` wall-clock boundaries.
@@ -46,6 +47,18 @@ This crate currently implements:
   - current SDK `Market` payload may omit `feeType`; fallback treats `5m/15m` + `feesEnabled=true` as `crypto_15_min`
 - `ref_price`, `price`, and `probability` remain placeholders (`-`) for now (not sourced from Gamma market metadata in this step).
 
+## Logging behavior (Step 6)
+- Logging is initialized once at process start via a shared observability module.
+- Event naming baseline:
+  - `app.start`, `app.bind`, `source.selected`
+  - `discovery.cycle.start`, `discovery.cycle.finish`
+  - `discovery.resolve.error`, `discovery.degraded.batch_transport`, `discovery.degraded.row_transport`
+  - `http.dashboard.request`, `http.snapshot.request`
+- Env vars:
+  - `PMM_LOG_LEVEL` (default: `info`)
+  - `PMM_LOG_FORMAT` (`pretty|json`, default: `pretty`)
+  - `PMM_LOG_TARGET` (`true|false`, default: `true`)
+
 Example filter URL:
 
 ```text
@@ -77,6 +90,12 @@ Use demo snapshot source instead of live discovery:
 
 ```bash
 PMM_DASHBOARD_USE_DEMO=1 cargo run --bin dashboard_server
+```
+
+Run with JSON logs:
+
+```bash
+PMM_LOG_FORMAT=json PMM_LOG_LEVEL=info cargo run --bin dashboard_server
 ```
 
 Run live Gamma integration test (network required):

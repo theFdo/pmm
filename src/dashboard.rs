@@ -1,7 +1,11 @@
 //! Step 4 dashboard logic: filters, in-interval evaluation, formatting, and realtime rendering.
 
 use std::collections::HashSet;
+#[cfg(feature = "discovery-sdk")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "discovery-sdk")]
+use std::time::Instant;
 
 use axum::{
     extract::{Query, State},
@@ -12,6 +16,9 @@ use axum::{
 use chrono::{Datelike, Days, TimeZone, Timelike, Utc};
 use chrono_tz::America::New_York;
 use serde::{Deserialize, Deserializer, Serialize};
+use tracing::info;
+#[cfg(feature = "discovery-sdk")]
+use tracing::{debug, error, warn};
 
 use crate::discovery::{
     build_previous_active_and_next_discovery_keys, DiscoveryWindow, ALL_COINS, ALL_DURATIONS,
@@ -73,6 +80,8 @@ pub const DASHBOARD_COLUMN_KEYS: [&str; 21] = [
 
 const COIN_OPTIONS: [&str; 4] = ["BTC", "ETH", "SOL", "XRP"];
 const DURATION_OPTIONS: [&str; 5] = ["5m", "15m", "1h", "4h", "1d"];
+#[cfg(feature = "discovery-sdk")]
+static DISCOVERY_CYCLE_SEQ: AtomicU64 = AtomicU64::new(1);
 const DASHBOARD_CLIENT_SCRIPT: &str = r#"<script>
 (function () {
   const params = window.location.search;
@@ -688,6 +697,8 @@ fn render_dashboard_html_with_filters(
 
 #[cfg(feature = "discovery-sdk")]
 async fn build_live_discovery_snapshot(config: LiveDiscoveryConfig) -> DashboardSnapshot {
+    let cycle_id = DISCOVERY_CYCLE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let started_at = Instant::now();
     let now_ts = Utc::now().timestamp();
     let scheduled = match build_previous_active_and_next_discovery_keys(
         now_ts,
@@ -697,30 +708,123 @@ async fn build_live_discovery_snapshot(config: LiveDiscoveryConfig) -> Dashboard
     ) {
         Ok(keys) => keys,
         Err(err) => {
-            eprintln!("live discovery: failed to build scheduled keys: {err}");
+            error!(
+                component = "dashboard",
+                event = "discovery.resolve.error",
+                cycle_id,
+                error = %err
+            );
+            info!(
+                component = "dashboard",
+                event = "discovery.cycle.finish",
+                cycle_id,
+                scheduled_count = 0usize,
+                resolved_count = 0usize,
+                unresolved_count = 0usize,
+                transport_error_count = 0usize,
+                duration_ms = started_at.elapsed().as_millis() as u64
+            );
             return DashboardSnapshot { rows: Vec::new() };
         }
     };
+    info!(
+        component = "dashboard",
+        event = "discovery.cycle.start",
+        cycle_id,
+        scheduled_count = scheduled.len()
+    );
 
     let keys: Vec<_> = scheduled.iter().map(|entry| entry.key.clone()).collect();
-    let rows = match resolve_discovery_batch(&keys, &config.discovery_config).await {
-        Ok(resolved) => resolved
-            .iter()
-            .zip(scheduled.iter())
-            .map(|(row, scheduled_key)| discovery_row_to_dashboard_row(row, scheduled_key))
-            .collect(),
-        Err(err) => {
-            eprintln!("live discovery: batch resolution error: {err}");
-            scheduled
-                .iter()
-                .map(|scheduled_key| {
-                    unresolved_dashboard_row_with_reason(scheduled_key, &err.to_string())
-                })
-                .collect()
-        }
-    };
+    let (rows, resolved_count, unresolved_count, transport_error_count) =
+        match resolve_discovery_batch(&keys, &config.discovery_config).await {
+            Ok(resolved) => {
+                let mut rows = Vec::with_capacity(scheduled.len());
+                let mut resolved_count = 0usize;
+                let mut unresolved_count = 0usize;
+                let mut transport_error_count = 0usize;
+
+                for (row, scheduled_key) in resolved.iter().zip(scheduled.iter()) {
+                    match &row.status {
+                        DiscoveryStatus::Resolved { .. } => {
+                            resolved_count += 1;
+                        }
+                        DiscoveryStatus::Unresolved { reason } => {
+                            unresolved_count += 1;
+                            if let UnresolvedReason::TransportError(message) = reason {
+                                transport_error_count += 1;
+                                debug!(
+                                    component = "dashboard",
+                                    event = "discovery.degraded.row_transport",
+                                    cycle_id,
+                                    slug = %row.key.slug,
+                                    coin = %coin_label(row.key.coin),
+                                    duration = %duration_label(row.key.duration),
+                                    window = %discovery_window_label(scheduled_key.window),
+                                    reason = %message
+                                );
+                            }
+                        }
+                    }
+
+                    rows.push(discovery_row_to_dashboard_row(row, scheduled_key));
+                }
+
+                (
+                    rows,
+                    resolved_count,
+                    unresolved_count,
+                    transport_error_count,
+                )
+            }
+            Err(err) => {
+                error!(
+                    component = "dashboard",
+                    event = "discovery.resolve.error",
+                    cycle_id,
+                    error = %err
+                );
+                warn!(
+                    component = "dashboard",
+                    event = "discovery.degraded.batch_transport",
+                    cycle_id,
+                    scheduled_count = scheduled.len(),
+                    reason = %err
+                );
+                (
+                    scheduled
+                        .iter()
+                        .map(|scheduled_key| {
+                            unresolved_dashboard_row_with_reason(scheduled_key, &err.to_string())
+                        })
+                        .collect(),
+                    0usize,
+                    scheduled.len(),
+                    scheduled.len(),
+                )
+            }
+        };
+
+    info!(
+        component = "dashboard",
+        event = "discovery.cycle.finish",
+        cycle_id,
+        scheduled_count = scheduled.len(),
+        resolved_count,
+        unresolved_count,
+        transport_error_count,
+        duration_ms = started_at.elapsed().as_millis() as u64
+    );
 
     DashboardSnapshot { rows }
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn discovery_window_label(window: DiscoveryWindow) -> &'static str {
+    match window {
+        DiscoveryWindow::Previous => "previous",
+        DiscoveryWindow::Active => "active",
+        DiscoveryWindow::Next => "next",
+    }
 }
 
 #[cfg(feature = "discovery-sdk")]
@@ -1379,7 +1483,16 @@ async fn get_dashboard_html(
     let snapshot = state.source.snapshot();
     let query = dashboard_query_from_pairs(&query_pairs);
     let filters = DashboardFilters::from_query(&query);
-    let html = render_dashboard_html_with_filters(&snapshot, &filters, Utc::now().timestamp());
+    let now_ts_utc = Utc::now().timestamp();
+    let filtered_rows = apply_filters(&snapshot.rows, &filters, now_ts_utc).len();
+    info!(
+        component = "dashboard",
+        event = "http.dashboard.request",
+        route = "/dashboard",
+        query_present = !query_pairs.is_empty(),
+        filtered_rows
+    );
+    let html = render_dashboard_html_with_filters(&snapshot, &filters, now_ts_utc);
     Html(html)
 }
 
@@ -1390,8 +1503,16 @@ async fn get_dashboard_snapshot(
     let snapshot = state.source.snapshot();
     let query = dashboard_query_from_pairs(&query_pairs);
     let filters = DashboardFilters::from_query(&query);
-    let display = build_display_snapshot(&snapshot, &filters, Utc::now().timestamp());
-    Json(display)
+    let display_snapshot = build_display_snapshot(&snapshot, &filters, Utc::now().timestamp());
+    let filtered_rows = display_snapshot.rows.len();
+    info!(
+        component = "dashboard",
+        event = "http.snapshot.request",
+        route = "/dashboard/snapshot",
+        query_present = !query_pairs.is_empty(),
+        filtered_rows
+    );
+    Json(display_snapshot)
 }
 
 fn dashboard_query_from_pairs(query_pairs: &[(String, String)]) -> DashboardQuery {
