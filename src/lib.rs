@@ -9,8 +9,11 @@ mod discovery;
 mod slug;
 
 pub use dashboard::{
-    dashboard_router, demo_snapshot, market_link, render_dashboard_html, DashboardRow,
-    DashboardSnapshot, DashboardSnapshotSource, InMemoryMockSnapshotSource, DASHBOARD_HEADERS,
+    apply_filters, build_display_snapshot, compute_in_interval, dashboard_router, demo_snapshot,
+    format_row_for_display, market_link, render_dashboard_html, BetsOpenFilter,
+    DashboardDisplayRow, DashboardDisplaySnapshot, DashboardFilters, DashboardQuery, DashboardRow,
+    DashboardSnapshot, DashboardSnapshotSource, InIntervalFilter, InMemoryMockSnapshotSource,
+    DASHBOARD_HEADERS,
 };
 pub use discovery::resolve_discovery_batch_with_fetcher;
 pub use discovery::{
