@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{Datelike, Days, TimeZone, Timelike, Utc};
+use chrono_tz::America::New_York;
 use thiserror::Error;
 
 use crate::{build_slug, Coin, Duration, SlugConfig, SlugError};
@@ -99,7 +101,13 @@ pub enum DiscoveryError {
 }
 
 pub const ALL_COINS: [Coin; 4] = [Coin::Btc, Coin::Eth, Coin::Sol, Coin::Xrp];
-pub const ALL_DURATIONS: [Duration; 4] = [Duration::M5, Duration::M15, Duration::H1, Duration::H4];
+pub const ALL_DURATIONS: [Duration; 5] = [
+    Duration::M5,
+    Duration::M15,
+    Duration::H1,
+    Duration::H4,
+    Duration::D1,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiscoveryWindow {
@@ -126,6 +134,13 @@ pub fn interval_starts_for_now(
     now_ts_utc: i64,
     slug_cfg: SlugConfig,
 ) -> IntervalStarts {
+    if matches!(duration, Duration::H4) {
+        return interval_starts_for_4h_ny(now_ts_utc);
+    }
+    if matches!(duration, Duration::D1) {
+        return interval_starts_for_1d_ny_noon(now_ts_utc);
+    }
+
     let step = duration_step_seconds(duration);
     let offset = interval_offset_seconds(duration, slug_cfg);
     let aligned_base = now_ts_utc.saturating_sub(offset);
@@ -141,6 +156,84 @@ pub fn interval_starts_for_now(
         active_start_ts_utc: active_start,
         next_start_ts_utc,
     }
+}
+
+fn interval_starts_for_4h_ny(now_ts_utc: i64) -> IntervalStarts {
+    let now_ny = Utc
+        .timestamp_opt(now_ts_utc, 0)
+        .single()
+        .expect("valid now timestamp expected")
+        .with_timezone(&New_York);
+    let date = now_ny.date_naive();
+
+    let block_hour = (now_ny.hour() / 4) * 4;
+    let active = ny_datetime(date, block_hour).expect("valid NY local 4h boundary");
+
+    let previous = if block_hour == 0 {
+        let prev_date = date
+            .checked_sub_days(Days::new(1))
+            .expect("previous date should exist");
+        ny_datetime(prev_date, 20).expect("valid previous NY 4h boundary")
+    } else {
+        ny_datetime(date, block_hour - 4).expect("valid previous NY 4h boundary")
+    };
+
+    let next = if block_hour == 20 {
+        let next_date = date
+            .checked_add_days(Days::new(1))
+            .expect("next date should exist");
+        ny_datetime(next_date, 0).expect("valid next NY 4h boundary")
+    } else {
+        ny_datetime(date, block_hour + 4).expect("valid next NY 4h boundary")
+    };
+
+    IntervalStarts {
+        previous_start_ts_utc: previous.with_timezone(&Utc).timestamp(),
+        active_start_ts_utc: active.with_timezone(&Utc).timestamp(),
+        next_start_ts_utc: next.with_timezone(&Utc).timestamp(),
+    }
+}
+
+fn interval_starts_for_1d_ny_noon(now_ts_utc: i64) -> IntervalStarts {
+    let now_ny = Utc
+        .timestamp_opt(now_ts_utc, 0)
+        .single()
+        .expect("valid now timestamp expected")
+        .with_timezone(&New_York);
+    let date = now_ny.date_naive();
+    let today_noon = ny_datetime(date, 12).expect("valid NY noon");
+
+    let active = if now_ny < today_noon {
+        let prev_date = date
+            .checked_sub_days(Days::new(1))
+            .expect("previous date should exist");
+        ny_datetime(prev_date, 12).expect("valid previous NY noon")
+    } else {
+        today_noon
+    };
+
+    let active_date = active.date_naive();
+    let previous_date = active_date
+        .checked_sub_days(Days::new(1))
+        .expect("previous date should exist");
+    let next_date = active_date
+        .checked_add_days(Days::new(1))
+        .expect("next date should exist");
+
+    let previous = ny_datetime(previous_date, 12).expect("valid previous NY noon");
+    let next = ny_datetime(next_date, 12).expect("valid next NY noon");
+
+    IntervalStarts {
+        previous_start_ts_utc: previous.with_timezone(&Utc).timestamp(),
+        active_start_ts_utc: active.with_timezone(&Utc).timestamp(),
+        next_start_ts_utc: next.with_timezone(&Utc).timestamp(),
+    }
+}
+
+fn ny_datetime(date: chrono::NaiveDate, hour: u32) -> Option<chrono::DateTime<chrono_tz::Tz>> {
+    New_York
+        .with_ymd_and_hms(date.year(), date.month(), date.day(), hour, 0, 0)
+        .single()
 }
 
 pub fn build_active_discovery_keys(
@@ -222,13 +315,17 @@ fn duration_step_seconds(duration: Duration) -> i64 {
         Duration::M15 => 15 * 60,
         Duration::H1 => 60 * 60,
         Duration::H4 => 4 * 60 * 60,
+        Duration::D1 => 24 * 60 * 60,
     }
 }
 
 fn interval_offset_seconds(duration: Duration, slug_cfg: SlugConfig) -> i64 {
     match duration {
-        Duration::H4 => i64::from(slug_cfg.discovery_offset_4h_min) * 60,
-        Duration::M5 | Duration::M15 | Duration::H1 => 0,
+        Duration::H4 => {
+            let _ = slug_cfg;
+            0
+        }
+        Duration::M5 | Duration::M15 | Duration::H1 | Duration::D1 => 0,
     }
 }
 
@@ -589,16 +686,53 @@ mod tests {
     }
 
     #[test]
-    fn interval_4h_respects_offset_for_previous_active_and_next_start() {
-        let cfg = SlugConfig {
-            discovery_offset_4h_min: 60,
-        };
-        // 2025-01-01 00:30:00 UTC, 4h boundaries are 01:00, 05:00, ...
+    fn interval_4h_uses_et_previous_active_and_next_start() {
+        let cfg = SlugConfig::default();
+        // 2025-01-01 00:30:00 UTC = 2024-12-31 19:30 ET
+        // ET 4h boundaries are 00/04/08/12/16/20 ET.
         let now = 1_735_691_400;
         let starts = interval_starts_for_now(Duration::H4, now, cfg);
-        assert_eq!(starts.previous_start_ts_utc, 1_735_664_400); // 2024-12-31 17:00
-        assert_eq!(starts.active_start_ts_utc, 1_735_678_800); // 2024-12-31 21:00
-        assert_eq!(starts.next_start_ts_utc, 1_735_693_200); // 2025-01-01 01:00
+        let previous = ny_datetime(chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(), 12)
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+        let active = ny_datetime(chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(), 16)
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+        let next = ny_datetime(chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(), 20)
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+
+        assert_eq!(starts.previous_start_ts_utc, previous);
+        assert_eq!(starts.active_start_ts_utc, active);
+        assert_eq!(starts.next_start_ts_utc, next);
+    }
+
+    #[test]
+    fn interval_1d_aligns_to_et_noon_boundaries() {
+        let cfg = SlugConfig::default();
+        // 2026-02-26 16:20:00 UTC = 11:20 ET, so active window started previous day at 12:00 ET.
+        let now = 1_772_122_800;
+        let starts = interval_starts_for_now(Duration::D1, now, cfg);
+
+        let previous = ny_datetime(chrono::NaiveDate::from_ymd_opt(2026, 2, 24).unwrap(), 12)
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+        let active = ny_datetime(chrono::NaiveDate::from_ymd_opt(2026, 2, 25).unwrap(), 12)
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+        let next = ny_datetime(chrono::NaiveDate::from_ymd_opt(2026, 2, 26).unwrap(), 12)
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp();
+
+        assert_eq!(starts.previous_start_ts_utc, previous);
+        assert_eq!(starts.active_start_ts_utc, active);
+        assert_eq!(starts.next_start_ts_utc, next);
     }
 
     #[test]

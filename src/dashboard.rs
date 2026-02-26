@@ -9,22 +9,30 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use chrono::{TimeZone, Utc};
+use chrono::{Datelike, Days, TimeZone, Timelike, Utc};
+use chrono_tz::America::New_York;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::discovery::{
     build_previous_active_and_next_discovery_keys, DiscoveryWindow, ALL_COINS, ALL_DURATIONS,
 };
+#[cfg(feature = "discovery-sdk")]
+use crate::discovery::{
+    resolve_discovery_batch, DiscoveryConfig, DiscoveryRow, DiscoveryStatus, ScheduledDiscoveryKey,
+    SdkMarket, UnresolvedReason,
+};
 use crate::slug::{Coin, Duration, SlugConfig};
 
-pub const DASHBOARD_HEADERS: [&str; 22] = [
+pub const DASHBOARD_HEADERS: [&str; 21] = [
     "Link",
     "Coin",
     "Duration",
     "Bets Open",
     "In Interval",
     "End",
-    "Midprice",
+    "Ref Price",
+    "Price",
+    "Probability",
     "Best Bid YES",
     "Best Ask YES",
     "Position Net",
@@ -33,23 +41,22 @@ pub const DASHBOARD_HEADERS: [&str; 22] = [
     "Offer YES",
     "Offer NO",
     "Net Profit",
-    "Fee %",
+    "Taker Fee %",
+    "Maker Fee %",
+    "Fee Exp",
     "Reward %",
-    "P_finished",
-    "P_running",
-    "P_next",
-    "dist1(mu,sigma,nu,lambda)",
-    "dist2(mu,sigma,nu,lambda)",
 ];
 
-pub const DASHBOARD_COLUMN_KEYS: [&str; 22] = [
+pub const DASHBOARD_COLUMN_KEYS: [&str; 21] = [
     "link",
     "coin",
     "duration",
     "bets_open",
     "in_interval",
     "end",
-    "midprice",
+    "ref_price",
+    "price",
+    "probability",
     "best_bid_yes",
     "best_ask_yes",
     "position_net",
@@ -58,17 +65,14 @@ pub const DASHBOARD_COLUMN_KEYS: [&str; 22] = [
     "offer_yes",
     "offer_no",
     "net_profit",
-    "fee_pct",
+    "taker_fee_pct",
+    "maker_fee_pct",
+    "fee_exponent",
     "reward_pct",
-    "p_finished",
-    "p_running",
-    "p_next",
-    "dist1",
-    "dist2",
 ];
 
 const COIN_OPTIONS: [&str; 4] = ["BTC", "ETH", "SOL", "XRP"];
-const DURATION_OPTIONS: [&str; 4] = ["5m", "15m", "1h", "4h"];
+const DURATION_OPTIONS: [&str; 5] = ["5m", "15m", "1h", "4h", "1d"];
 const DASHBOARD_CLIENT_SCRIPT: &str = r#"<script>
 (function () {
   const params = window.location.search;
@@ -123,7 +127,9 @@ const DASHBOARD_CLIENT_SCRIPT: &str = r#"<script>
       <td class="${tdClass(row, 'bets_open', '')}">${esc(row.bets_open)}</td>
       <td class="${tdClass(row, 'in_interval', '')}">${esc(row.in_interval)}</td>
       <td data-end-ts="${row.end_ts_utc}" class="${tdClass(row, 'end', '')}">${esc(endLocal)}</td>
-      <td class="${tdClass(row, 'midprice', '')}">${esc(row.midprice)}</td>
+      <td class="${tdClass(row, 'ref_price', '')}">${esc(row.ref_price)}</td>
+      <td class="${tdClass(row, 'price', '')}">${esc(row.price)}</td>
+      <td class="${tdClass(row, 'probability', '')}">${esc(row.probability)}</td>
       <td class="${tdClass(row, 'best_bid_yes', '')}">${esc(row.best_bid_yes)}</td>
       <td class="${tdClass(row, 'best_ask_yes', '')}">${esc(row.best_ask_yes)}</td>
       <td class="${tdClass(row, 'position_net', '')}">${esc(row.position_net)}</td>
@@ -132,13 +138,10 @@ const DASHBOARD_CLIENT_SCRIPT: &str = r#"<script>
       <td class="${tdClass(row, 'offer_yes', '')}">${esc(row.offer_yes)}</td>
       <td class="${tdClass(row, 'offer_no', '')}">${esc(row.offer_no)}</td>
       <td class="${tdClass(row, 'net_profit', '')}">${esc(row.net_profit)}</td>
-      <td class="${tdClass(row, 'fee_pct', '')}">${esc(row.fee_pct)}</td>
+      <td class="${tdClass(row, 'taker_fee_pct', '')}">${esc(row.taker_fee_pct)}</td>
+      <td class="${tdClass(row, 'maker_fee_pct', '')}">${esc(row.maker_fee_pct)}</td>
+      <td class="${tdClass(row, 'fee_exponent', '')}">${esc(row.fee_exponent)}</td>
       <td class="${tdClass(row, 'reward_pct', '')}">${esc(row.reward_pct)}</td>
-      <td class="${tdClass(row, 'p_finished', '')}">${esc(row.p_finished)}</td>
-      <td class="${tdClass(row, 'p_running', '')}">${esc(row.p_running)}</td>
-      <td class="${tdClass(row, 'p_next', '')}">${esc(row.p_next)}</td>
-      <td class="${tdClass(row, 'dist1', '')}">${esc(row.dist1)}</td>
-      <td class="${tdClass(row, 'dist2', '')}">${esc(row.dist2)}</td>
     </tr>`;
   }
 
@@ -179,7 +182,7 @@ const DASHBOARD_CLIENT_SCRIPT: &str = r#"<script>
       window.location.assign(next ? `/dashboard?${next}` : '/dashboard');
     });
   }
-  setInterval(refresh, 100);
+  setInterval(refresh, 250);
 })();
 </script>"#;
 
@@ -198,7 +201,9 @@ pub struct DashboardRow {
     pub bets_open: Option<String>,
     pub in_interval: Option<String>,
     pub end_hhmm: Option<String>,
-    pub midprice: Option<String>,
+    pub ref_price: Option<String>,
+    pub price: Option<String>,
+    pub probability: Option<String>,
     pub best_bid_yes: Option<String>,
     pub best_ask_yes: Option<String>,
     pub position_net: Option<String>,
@@ -207,13 +212,10 @@ pub struct DashboardRow {
     pub offer_yes: Option<String>,
     pub offer_no: Option<String>,
     pub net_profit: Option<String>,
-    pub fee_pct: Option<String>,
+    pub taker_fee_pct: Option<String>,
+    pub maker_fee_pct: Option<String>,
+    pub fee_exponent: Option<String>,
     pub reward_pct: Option<String>,
-    pub p_finished: Option<String>,
-    pub p_running: Option<String>,
-    pub p_next: Option<String>,
-    pub dist1: Option<String>,
-    pub dist2: Option<String>,
     pub mock_columns: Vec<String>,
 }
 
@@ -242,7 +244,9 @@ impl DashboardRow {
             bets_open: None,
             in_interval: None,
             end_hhmm: None,
-            midprice: None,
+            ref_price: None,
+            price: None,
+            probability: None,
             best_bid_yes: None,
             best_ask_yes: None,
             position_net: None,
@@ -251,13 +255,10 @@ impl DashboardRow {
             offer_yes: None,
             offer_no: None,
             net_profit: None,
-            fee_pct: None,
+            taker_fee_pct: None,
+            maker_fee_pct: None,
+            fee_exponent: None,
             reward_pct: None,
-            p_finished: None,
-            p_running: None,
-            p_next: None,
-            dist1: None,
-            dist2: None,
             mock_columns: default_mock_columns(),
         }
     }
@@ -284,7 +285,9 @@ pub struct DashboardDisplayRow {
     pub bets_open: String,
     pub in_interval: String,
     pub end_hhmm: String,
-    pub midprice: String,
+    pub ref_price: String,
+    pub price: String,
+    pub probability: String,
     pub best_bid_yes: String,
     pub best_ask_yes: String,
     pub position_net: String,
@@ -293,13 +296,10 @@ pub struct DashboardDisplayRow {
     pub offer_yes: String,
     pub offer_no: String,
     pub net_profit: String,
-    pub fee_pct: String,
+    pub taker_fee_pct: String,
+    pub maker_fee_pct: String,
+    pub fee_exponent: String,
     pub reward_pct: String,
-    pub p_finished: String,
-    pub p_running: String,
-    pub p_next: String,
-    pub dist1: String,
-    pub dist2: String,
     pub mock_columns: Vec<String>,
 }
 
@@ -427,6 +427,100 @@ impl DashboardSnapshotSource for InMemoryMockSnapshotSource {
     }
 }
 
+#[cfg(feature = "discovery-sdk")]
+#[derive(Debug, Clone, Copy)]
+pub struct LiveDiscoveryConfig {
+    pub refresh_interval_ms: u64,
+    pub slug_config: SlugConfig,
+    pub discovery_config: DiscoveryConfig,
+}
+
+#[cfg(feature = "discovery-sdk")]
+impl Default for LiveDiscoveryConfig {
+    fn default() -> Self {
+        let offset = std::env::var("PMFLIPS_DISCOVERY_OFFSET_4H_MIN")
+            .ok()
+            .and_then(|raw| raw.parse::<i32>().ok())
+            .unwrap_or(60);
+
+        let timeout_ms = std::env::var("PMM_DISCOVERY_TIMEOUT_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(3_000);
+        let batch_size = std::env::var("PMM_DISCOVERY_BATCH_SIZE")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(64);
+        let max_retries = std::env::var("PMM_DISCOVERY_MAX_RETRIES")
+            .ok()
+            .and_then(|raw| raw.parse::<u32>().ok())
+            .unwrap_or(2);
+        let retry_backoff_ms = std::env::var("PMM_DISCOVERY_RETRY_BACKOFF_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(200);
+        let refresh_interval_ms = std::env::var("PMM_DASHBOARD_DISCOVERY_REFRESH_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(1_000);
+
+        Self {
+            refresh_interval_ms,
+            slug_config: SlugConfig {
+                discovery_offset_4h_min: offset,
+            },
+            discovery_config: DiscoveryConfig {
+                timeout_ms,
+                batch_size,
+                max_retries,
+                retry_backoff_ms,
+                include_tag: false,
+            },
+        }
+    }
+}
+
+#[cfg(feature = "discovery-sdk")]
+#[derive(Clone)]
+pub struct LiveDiscoverySnapshotSource {
+    inner: Arc<RwLock<DashboardSnapshot>>,
+}
+
+#[cfg(feature = "discovery-sdk")]
+impl LiveDiscoverySnapshotSource {
+    pub fn spawn(config: LiveDiscoveryConfig) -> Self {
+        let initial = demo_snapshot();
+        let inner = Arc::new(RwLock::new(initial));
+        let inner_bg = Arc::clone(&inner);
+
+        tokio::spawn(async move {
+            loop {
+                let refreshed = build_live_discovery_snapshot(config).await;
+                {
+                    let mut guard = inner_bg
+                        .write()
+                        .expect("live discovery snapshot lock should not be poisoned");
+                    *guard = refreshed;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(config.refresh_interval_ms))
+                    .await;
+            }
+        });
+
+        Self { inner }
+    }
+}
+
+#[cfg(feature = "discovery-sdk")]
+impl DashboardSnapshotSource for LiveDiscoverySnapshotSource {
+    fn snapshot(&self) -> DashboardSnapshot {
+        self.inner
+            .read()
+            .expect("live discovery snapshot lock should not be poisoned")
+            .clone()
+    }
+}
+
 pub fn dashboard_router(source: Arc<dyn DashboardSnapshotSource>) -> Router {
     Router::new()
         .route("/dashboard", get(get_dashboard_html))
@@ -469,7 +563,9 @@ pub fn format_row_for_display(row: &DashboardRow, now_ts_utc: i64) -> DashboardD
         bets_open: format_column_value("bets_open", row.bets_open.as_deref()),
         in_interval: if in_interval { "yes" } else { "no" }.to_string(),
         end_hhmm: utc_hhmm(row.end_ts_utc),
-        midprice: format_column_value("midprice", row.midprice.as_deref()),
+        ref_price: format_column_value("ref_price", row.ref_price.as_deref()),
+        price: format_column_value("price", row.price.as_deref()),
+        probability: format_column_value("probability", row.probability.as_deref()),
         best_bid_yes: format_column_value("best_bid_yes", row.best_bid_yes.as_deref()),
         best_ask_yes: format_column_value("best_ask_yes", row.best_ask_yes.as_deref()),
         position_net: format_column_value("position_net", row.position_net.as_deref()),
@@ -478,13 +574,10 @@ pub fn format_row_for_display(row: &DashboardRow, now_ts_utc: i64) -> DashboardD
         offer_yes: format_column_value("offer_yes", row.offer_yes.as_deref()),
         offer_no: format_column_value("offer_no", row.offer_no.as_deref()),
         net_profit: format_column_value("net_profit", row.net_profit.as_deref()),
-        fee_pct: format_column_value("fee_pct", row.fee_pct.as_deref()),
+        taker_fee_pct: format_column_value("taker_fee_pct", row.taker_fee_pct.as_deref()),
+        maker_fee_pct: format_column_value("maker_fee_pct", row.maker_fee_pct.as_deref()),
+        fee_exponent: format_column_value("fee_exponent", row.fee_exponent.as_deref()),
         reward_pct: format_column_value("reward_pct", row.reward_pct.as_deref()),
-        p_finished: format_column_value("p_finished", row.p_finished.as_deref()),
-        p_running: format_column_value("p_running", row.p_running.as_deref()),
-        p_next: format_column_value("p_next", row.p_next.as_deref()),
-        dist1: format_column_value("dist1", row.dist1.as_deref()),
-        dist2: format_column_value("dist2", row.dist2.as_deref()),
         mock_columns: row.mock_columns.clone(),
     }
 }
@@ -520,11 +613,11 @@ fn render_dashboard_html_with_filters(
     out.push_str("<!DOCTYPE html><html><head><meta charset=\"utf-8\">\n");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     out.push_str("<title>PMM Dashboard</title>\n");
-    out.push_str("<style>:root{--bg:#f5f1e7;--bg2:#e9f0f2;--card:#ffffff;--ink:#182026;--muted:#5f6a73;--line:#d7dce1;--head:#14343f;--btn:#0c5f78;--btnhover:#094d61;--mockbg:#fff5b8;--mockink:#555c63}*{box-sizing:border-box}body{margin:0;color:var(--ink);font-family:\"Space Grotesk\",\"Avenir Next\",\"Segoe UI\",sans-serif;background:radial-gradient(circle at 10% 5%, #ffe7a3 0%, transparent 30%),radial-gradient(circle at 90% 0%, #b9e5f0 0%, transparent 28%),linear-gradient(160deg,var(--bg),var(--bg2));min-height:100vh}.shell{max-width:1550px;margin:0 auto;padding:20px 16px 26px}.hero{background:linear-gradient(135deg,#102f3a 0%,#24576b 100%);color:#f7fbfc;border-radius:16px;padding:18px 20px;box-shadow:0 10px 30px rgba(16,47,58,.25)}.hero h1{margin:0 0 8px;font-size:1.58rem}.hero-meta{display:flex;gap:14px;flex-wrap:wrap;font-size:.9rem;color:#dcebf0}.filters{margin-top:12px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.22);border-radius:12px;padding:10px 12px}.filter-grid{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:10px}.filter-block{background:rgba(0,0,0,.12);border-radius:10px;padding:8px}.filter-title{font-size:.74rem;letter-spacing:.04em;text-transform:uppercase;margin:0 0 6px;color:#dbeaf0}.filter-item{display:flex;align-items:center;gap:6px;font-size:.85rem;margin:3px 0}.filter-actions{margin-top:10px;display:flex;gap:10px;align-items:center}.auto-note{font-size:.76rem;color:#dcebf0;opacity:.9}.btn{padding:7px 10px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-weight:700;font-size:.78rem;cursor:pointer}.btn-reset{background:#e4eef2;color:#1b3642;text-decoration:none}.card{margin-top:14px;background:var(--card);border:1px solid #cbd4db;border-radius:16px;overflow:hidden;box-shadow:0 12px 28px rgba(26,35,42,.12)}.table-wrap{overflow:auto;max-height:75vh}table{width:100%;border-collapse:collapse;min-width:1300px}thead th{position:sticky;top:0;z-index:2;background:var(--head);color:#f2f7f9;font-size:.79rem;text-transform:uppercase;letter-spacing:.04em;padding:10px;border-bottom:1px solid #0e2730}tbody td{font-size:.84rem;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}tbody tr:nth-child(even){background:#fafcfd}.market-cell{min-width:220px}.market-btn{display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--btn),#0f7592);color:#fff;text-decoration:none;padding:7px 10px;border-radius:9px;font-weight:700;font-size:.76rem;border:1px solid rgba(0,0,0,.12);box-shadow:0 2px 8px rgba(12,95,120,.25)}.market-btn:hover{background:linear-gradient(135deg,var(--btnhover),#0d5f78)}.slug-id{display:block;margin-top:6px;font-family:\"IBM Plex Mono\",\"SFMono-Regular\",monospace;font-size:.67rem;color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis}.cell-mock{background:linear-gradient(135deg,var(--mockbg) 0%,#fff3ca 100%);color:var(--mockink)}.cell-mock::after{content:\" M\";font-size:.62rem;font-weight:700;color:#8c6a00}.legend{padding:10px 14px;border-top:1px solid var(--line);font-size:.8rem;color:var(--muted);background:#f8fbfc;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}.legend b{color:#8c6a00}@media (max-width:980px){.filter-grid{grid-template-columns:repeat(2,minmax(150px,1fr))}}@media (max-width:760px){.hero h1{font-size:1.28rem}.shell{padding:12px}.card{margin-top:12px;border-radius:12px}.filter-grid{grid-template-columns:1fr}}</style>\n");
+    out.push_str("<style>:root{--bg:#f5f1e7;--bg2:#e9f0f2;--card:#ffffff;--ink:#182026;--muted:#5f6a73;--line:#d7dce1;--head:#14343f;--btn:#0c5f78;--btnhover:#094d61;--mockbg:#fff5b8;--mockink:#555c63}*{box-sizing:border-box}body{margin:0;color:var(--ink);font-family:\"Space Grotesk\",\"Avenir Next\",\"Segoe UI\",sans-serif;background:radial-gradient(circle at 10% 5%, #ffe7a3 0%, transparent 30%),radial-gradient(circle at 90% 0%, #b9e5f0 0%, transparent 28%),linear-gradient(160deg,var(--bg),var(--bg2));min-height:100vh}.shell{max-width:none;width:100%;margin:0;padding:20px 16px 26px}.hero{background:linear-gradient(135deg,#102f3a 0%,#24576b 100%);color:#f7fbfc;border-radius:16px;padding:18px 20px;box-shadow:0 10px 30px rgba(16,47,58,.25)}.hero h1{margin:0 0 8px;font-size:1.58rem}.hero-meta{display:flex;gap:14px;flex-wrap:wrap;font-size:.9rem;color:#dcebf0}.filters{margin-top:12px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.22);border-radius:12px;padding:10px 12px}.filter-grid{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:10px}.filter-block{background:rgba(0,0,0,.12);border-radius:10px;padding:8px}.filter-title{font-size:.74rem;letter-spacing:.04em;text-transform:uppercase;margin:0 0 6px;color:#dbeaf0}.filter-item{display:flex;align-items:center;gap:6px;font-size:.85rem;margin:3px 0}.filter-actions{margin-top:10px;display:flex;gap:10px;align-items:center}.auto-note{font-size:.76rem;color:#dcebf0;opacity:.9}.btn{padding:7px 10px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-weight:700;font-size:.78rem;cursor:pointer}.btn-reset{background:#e4eef2;color:#1b3642;text-decoration:none}.card{margin-top:14px;background:var(--card);border:1px solid #cbd4db;border-radius:16px;overflow:hidden;box-shadow:0 12px 28px rgba(26,35,42,.12)}.table-wrap{overflow:auto;max-height:75vh}table{width:100%;border-collapse:collapse;min-width:1300px}thead th{position:sticky;top:0;z-index:2;background:var(--head);color:#f2f7f9;font-size:.79rem;text-transform:uppercase;letter-spacing:.04em;padding:10px;border-bottom:1px solid #0e2730}tbody td{font-size:.84rem;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}tbody tr:nth-child(even){background:#fafcfd}.market-cell{min-width:220px}.market-btn{display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--btn),#0f7592);color:#fff;text-decoration:none;padding:7px 10px;border-radius:9px;font-weight:700;font-size:.76rem;border:1px solid rgba(0,0,0,.12);box-shadow:0 2px 8px rgba(12,95,120,.25)}.market-btn:hover{background:linear-gradient(135deg,var(--btnhover),#0d5f78)}.slug-id{display:block;margin-top:6px;font-family:\"IBM Plex Mono\",\"SFMono-Regular\",monospace;font-size:.67rem;color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis}.cell-mock{background:linear-gradient(135deg,var(--mockbg) 0%,#fff3ca 100%);color:var(--mockink)}.cell-mock::after{content:\" M\";font-size:.62rem;font-weight:700;color:#8c6a00}.legend{padding:10px 14px;border-top:1px solid var(--line);font-size:.8rem;color:var(--muted);background:#f8fbfc;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}.legend b{color:#8c6a00}@media (max-width:980px){.filter-grid{grid-template-columns:repeat(2,minmax(150px,1fr))}}@media (max-width:760px){.hero h1{font-size:1.28rem}.shell{padding:12px}.card{margin-top:12px;border-radius:12px}.filter-grid{grid-template-columns:1fr}}</style>\n");
     out.push_str("</head><body><main class=\"shell\">\n");
     out.push_str("<section class=\"hero\"><h1>PMM Dashboard</h1>");
     out.push_str("<div class=\"hero-meta\">\n");
-    out.push_str("<span>Scope: 4 coins × 4 durations × previous/active/next</span>");
+    out.push_str("<span>Scope: 4 coins × 5 durations × previous/active/next</span>");
     out.push_str(&format!(
         "<span>Rows: <b id=\"row-count\">{}</b></span>",
         display.rows.len()
@@ -533,7 +626,7 @@ fn render_dashboard_html_with_filters(
         "<span>Server UTC: {}</span>",
         escape_html(&now_utc)
     ));
-    out.push_str("<span>Refresh: 100ms</span>");
+    out.push_str("<span>Refresh: 250ms</span>");
     out.push_str("</div>");
 
     out.push_str(
@@ -593,6 +686,241 @@ fn render_dashboard_html_with_filters(
     out
 }
 
+#[cfg(feature = "discovery-sdk")]
+async fn build_live_discovery_snapshot(config: LiveDiscoveryConfig) -> DashboardSnapshot {
+    let now_ts = Utc::now().timestamp();
+    let scheduled = match build_previous_active_and_next_discovery_keys(
+        now_ts,
+        &ALL_COINS,
+        &ALL_DURATIONS,
+        config.slug_config,
+    ) {
+        Ok(keys) => keys,
+        Err(err) => {
+            eprintln!("live discovery: failed to build scheduled keys: {err}");
+            return DashboardSnapshot { rows: Vec::new() };
+        }
+    };
+
+    let keys: Vec<_> = scheduled.iter().map(|entry| entry.key.clone()).collect();
+    let rows = match resolve_discovery_batch(&keys, &config.discovery_config).await {
+        Ok(resolved) => resolved
+            .iter()
+            .zip(scheduled.iter())
+            .map(|(row, scheduled_key)| discovery_row_to_dashboard_row(row, scheduled_key))
+            .collect(),
+        Err(err) => {
+            eprintln!("live discovery: batch resolution error: {err}");
+            scheduled
+                .iter()
+                .map(|scheduled_key| {
+                    unresolved_dashboard_row_with_reason(scheduled_key, &err.to_string())
+                })
+                .collect()
+        }
+    };
+
+    DashboardSnapshot { rows }
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn discovery_row_to_dashboard_row(
+    row: &DiscoveryRow<SdkMarket>,
+    scheduled: &ScheduledDiscoveryKey,
+) -> DashboardRow {
+    let start_ts_utc = row.key.start_ts_utc;
+    let end_ts_utc = interval_end_ts_utc(start_ts_utc, row.key.duration);
+    let mut dashboard_row = DashboardRow::unresolved_with_times(
+        row.key.slug.clone(),
+        coin_label(row.key.coin),
+        duration_label(row.key.duration),
+        start_ts_utc,
+        end_ts_utc,
+    );
+
+    dashboard_row.in_interval = Some(
+        match scheduled.window {
+            DiscoveryWindow::Active => "yes",
+            DiscoveryWindow::Previous | DiscoveryWindow::Next => "no",
+        }
+        .to_string(),
+    );
+    dashboard_row.end_hhmm = Some(utc_hhmm(end_ts_utc));
+
+    match &row.status {
+        DiscoveryStatus::Resolved { market } => {
+            if let Some(slug) = market.slug.clone() {
+                dashboard_row.slug = slug;
+            }
+            dashboard_row.bets_open = market_bets_open_label(market);
+            let fee_params = market_fee_params(market, row.key.duration);
+            dashboard_row.taker_fee_pct = Some(fee_params.taker_fee_pct);
+            dashboard_row.maker_fee_pct = Some(fee_params.maker_fee_pct);
+            dashboard_row.fee_exponent = Some(fee_params.fee_exponent);
+            dashboard_row.reward_pct =
+                Some(market_reward_pct(market).unwrap_or_else(|| "0".to_string()));
+            dashboard_row.mock_columns = resolved_mock_columns(&dashboard_row);
+        }
+        DiscoveryStatus::Unresolved { reason } => {
+            if let UnresolvedReason::TransportError(message) = reason {
+                dashboard_row.net_profit = Some(format!("transport:{message}"));
+            }
+        }
+    }
+
+    dashboard_row
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn unresolved_dashboard_row_with_reason(
+    scheduled: &ScheduledDiscoveryKey,
+    reason: &str,
+) -> DashboardRow {
+    let start_ts_utc = scheduled.key.start_ts_utc;
+    let end_ts_utc = interval_end_ts_utc(start_ts_utc, scheduled.key.duration);
+    let mut row = DashboardRow::unresolved_with_times(
+        scheduled.key.slug.clone(),
+        coin_label(scheduled.key.coin),
+        duration_label(scheduled.key.duration),
+        start_ts_utc,
+        end_ts_utc,
+    );
+
+    row.in_interval = Some(
+        match scheduled.window {
+            DiscoveryWindow::Active => "yes",
+            DiscoveryWindow::Previous | DiscoveryWindow::Next => "no",
+        }
+        .to_string(),
+    );
+    row.end_hhmm = Some(utc_hhmm(end_ts_utc));
+    row.net_profit = Some(format!("transport:{reason}"));
+    row
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn resolved_mock_columns(row: &DashboardRow) -> Vec<String> {
+    let mut mock = default_mock_columns();
+    let live_columns = [
+        ("bets_open", row.bets_open.is_some()),
+        ("taker_fee_pct", row.taker_fee_pct.is_some()),
+        ("maker_fee_pct", row.maker_fee_pct.is_some()),
+        ("fee_exponent", row.fee_exponent.is_some()),
+        ("reward_pct", row.reward_pct.is_some()),
+    ];
+
+    for (column, is_live) in live_columns {
+        if is_live {
+            mock.retain(|entry| entry != column);
+        }
+    }
+
+    mock
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn market_bets_open_label(market: &SdkMarket) -> Option<String> {
+    if let Some(accepting) = market.accepting_orders {
+        return Some(if accepting { "open" } else { "closed" }.to_string());
+    }
+    if let Some(closed) = market.closed {
+        return Some(if closed { "closed" } else { "open" }.to_string());
+    }
+    if let Some(active) = market.active {
+        return Some(if active { "open" } else { "closed" }.to_string());
+    }
+    None
+}
+
+#[cfg(feature = "discovery-sdk")]
+struct FeeParams {
+    taker_fee_pct: String,
+    maker_fee_pct: String,
+    fee_exponent: String,
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn market_fee_params(market: &SdkMarket, duration: Duration) -> FeeParams {
+    let fee_type = market
+        .format_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            market
+                .market_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
+    fee_params_from_type(fee_type, market.fees_enabled, duration)
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn fee_params_from_type(
+    fee_type: Option<&str>,
+    fees_enabled: Option<bool>,
+    duration: Duration,
+) -> FeeParams {
+    let fees_enabled = fees_enabled.unwrap_or(false);
+    if !fees_enabled {
+        return FeeParams {
+            taker_fee_pct: "0".to_string(),
+            maker_fee_pct: "0".to_string(),
+            fee_exponent: "-".to_string(),
+        };
+    }
+
+    // Per dashboard spec: crypto_15_min fees profile when fees are enabled.
+    if fees_enabled && matches!(fee_type, Some("crypto_15_min")) {
+        return FeeParams {
+            taker_fee_pct: "0.25".to_string(),
+            maker_fee_pct: "-0.05".to_string(),
+            fee_exponent: "2".to_string(),
+        };
+    }
+
+    // SDK fallback: Gamma feeType is not exposed in current SDK Market type for these crypto rows.
+    if fee_type.is_none() && matches!(duration, Duration::M5 | Duration::M15) {
+        return FeeParams {
+            taker_fee_pct: "0.25".to_string(),
+            maker_fee_pct: "-0.05".to_string(),
+            fee_exponent: "2".to_string(),
+        };
+    }
+
+    if fee_type.is_none() {
+        return FeeParams {
+            taker_fee_pct: "0".to_string(),
+            maker_fee_pct: "0".to_string(),
+            fee_exponent: "-".to_string(),
+        };
+    }
+
+    FeeParams {
+        taker_fee_pct: "0".to_string(),
+        maker_fee_pct: "0".to_string(),
+        fee_exponent: "-".to_string(),
+    }
+}
+
+#[cfg(feature = "discovery-sdk")]
+fn market_reward_pct(market: &SdkMarket) -> Option<String> {
+    if let Some(rewards) = market
+        .clob_rewards
+        .as_ref()
+        .and_then(|rewards| rewards.first())
+    {
+        if let Some(rate) = &rewards.rewards_daily_rate {
+            return Some(rate.to_string());
+        }
+        if let Some(amount) = &rewards.rewards_amount {
+            return Some(amount.to_string());
+        }
+    }
+    market.uma_reward.as_ref().map(|value| value.to_string())
+}
+
 pub fn demo_snapshot() -> DashboardSnapshot {
     let now_ts = Utc::now().timestamp();
     let offset = std::env::var("PMFLIPS_DISCOVERY_OFFSET_4H_MIN")
@@ -616,7 +944,7 @@ pub fn demo_snapshot() -> DashboardSnapshot {
 
 fn scheduled_key_to_demo_row(scheduled: crate::discovery::ScheduledDiscoveryKey) -> DashboardRow {
     let start_ts_utc = scheduled.key.start_ts_utc;
-    let end_ts_utc = start_ts_utc.saturating_add(duration_seconds(scheduled.key.duration));
+    let end_ts_utc = interval_end_ts_utc(start_ts_utc, scheduled.key.duration);
     let mut row = DashboardRow::unresolved_with_times(
         scheduled.key.slug,
         coin_label(scheduled.key.coin),
@@ -652,22 +980,64 @@ fn duration_label(duration: Duration) -> &'static str {
         Duration::M15 => "15m",
         Duration::H1 => "1h",
         Duration::H4 => "4h",
+        Duration::D1 => "1d",
     }
 }
 
-fn duration_seconds(duration: Duration) -> i64 {
+fn interval_end_ts_utc(start_ts_utc: i64, duration: Duration) -> i64 {
     match duration {
-        Duration::M5 => 5 * 60,
-        Duration::M15 => 15 * 60,
-        Duration::H1 => 60 * 60,
-        Duration::H4 => 4 * 60 * 60,
+        Duration::M5 => start_ts_utc.saturating_add(5 * 60),
+        Duration::M15 => start_ts_utc.saturating_add(15 * 60),
+        Duration::H1 => start_ts_utc.saturating_add(60 * 60),
+        Duration::H4 => {
+            let start_ny = Utc
+                .timestamp_opt(start_ts_utc, 0)
+                .single()
+                .expect("valid start timestamp expected")
+                .with_timezone(&New_York);
+            let date = start_ny.date_naive();
+            let block_hour = (start_ny.hour() / 4) * 4;
+
+            let next_local = if block_hour == 20 {
+                let next_date = date
+                    .checked_add_days(Days::new(1))
+                    .expect("next date should exist");
+                ny_datetime(next_date, 0).expect("valid next ET 4h boundary")
+            } else {
+                ny_datetime(date, block_hour + 4).expect("valid next ET 4h boundary")
+            };
+
+            next_local.with_timezone(&Utc).timestamp()
+        }
+        Duration::D1 => {
+            let start_ny = Utc
+                .timestamp_opt(start_ts_utc, 0)
+                .single()
+                .expect("valid start timestamp expected")
+                .with_timezone(&New_York);
+            let next_date = start_ny
+                .date_naive()
+                .checked_add_days(Days::new(1))
+                .expect("next date should exist");
+            ny_datetime(next_date, 12)
+                .expect("valid next ET noon boundary")
+                .with_timezone(&Utc)
+                .timestamp()
+        }
     }
+}
+
+fn ny_datetime(date: chrono::NaiveDate, hour: u32) -> Option<chrono::DateTime<chrono_tz::Tz>> {
+    New_York
+        .with_ymd_and_hms(date.year(), date.month(), date.day(), hour, 0, 0)
+        .single()
 }
 
 fn default_mock_columns() -> Vec<String> {
     DASHBOARD_COLUMN_KEYS
         .iter()
         .skip(3)
+        .filter(|entry| **entry != "in_interval" && **entry != "end")
         .map(|entry| (*entry).to_string())
         .collect()
 }
@@ -756,22 +1126,28 @@ fn utc_hhmm(ts: i64) -> String {
 
 fn format_column_value(column_key: &str, raw: Option<&str>) -> String {
     match column_key {
-        "fee_pct" | "reward_pct" => {
+        "taker_fee_pct" | "maker_fee_pct" | "reward_pct" => {
             if raw.map(|entry| entry.trim().is_empty()).unwrap_or(true) {
                 "0".to_string()
             } else {
                 format_maybe_composite(raw.unwrap_or_default(), 3)
             }
         }
-        "p_finished" | "p_running" | "p_next" => raw
+        "fee_exponent" => raw
+            .map(|value| {
+                if value.trim().is_empty() {
+                    "-".to_string()
+                } else {
+                    value.to_string()
+                }
+            })
+            .unwrap_or_else(|| "-".to_string()),
+        "probability" => raw
             .map(format_probability)
             .unwrap_or_else(|| "-".to_string()),
-        "midprice" | "best_bid_yes" | "best_ask_yes" | "position_net" | "pos_yes" | "pos_no"
-        | "offer_yes" | "offer_no" | "net_profit" => raw
+        "ref_price" | "price" | "best_bid_yes" | "best_ask_yes" | "position_net" | "pos_yes"
+        | "pos_no" | "offer_yes" | "offer_no" | "net_profit" => raw
             .map(|value| format_maybe_composite(value, 4))
-            .unwrap_or_else(|| "-".to_string()),
-        "dist1" | "dist2" => raw
-            .map(|value| format_dist_tuple(value, 3))
             .unwrap_or_else(|| "-".to_string()),
         _ => raw
             .map(|value| {
@@ -819,20 +1195,6 @@ fn format_maybe_composite(value: &str, sig_digits: usize) -> String {
     }
 
     format_numeric_or_keep(value.trim(), sig_digits)
-}
-
-fn format_dist_tuple(value: &str, sig_digits: usize) -> String {
-    let trimmed = value.trim();
-    if let Some(inner) = trimmed.strip_prefix('(').and_then(|v| v.strip_suffix(')')) {
-        let formatted = inner
-            .split(',')
-            .map(|segment| format_numeric_or_keep(segment.trim(), sig_digits))
-            .collect::<Vec<_>>()
-            .join(",");
-        return format!("({formatted})");
-    }
-
-    format_maybe_composite(trimmed, sig_digits)
 }
 
 fn format_numeric_or_keep(value: &str, sig_digits: usize) -> String {
@@ -945,13 +1307,15 @@ fn render_row_html(row: &DashboardDisplayRow, idx: usize) -> String {
     out.push_str(&escape_html(&row.slug));
     out.push_str("</span></td>");
 
-    let columns: [(&str, &str); 21] = [
+    let columns: [(&str, &str); 20] = [
         ("coin", &row.coin),
         ("duration", &row.duration),
         ("bets_open", &row.bets_open),
         ("in_interval", &row.in_interval),
         ("end", &row.end_hhmm),
-        ("midprice", &row.midprice),
+        ("ref_price", &row.ref_price),
+        ("price", &row.price),
+        ("probability", &row.probability),
         ("best_bid_yes", &row.best_bid_yes),
         ("best_ask_yes", &row.best_ask_yes),
         ("position_net", &row.position_net),
@@ -960,13 +1324,10 @@ fn render_row_html(row: &DashboardDisplayRow, idx: usize) -> String {
         ("offer_yes", &row.offer_yes),
         ("offer_no", &row.offer_no),
         ("net_profit", &row.net_profit),
-        ("fee_pct", &row.fee_pct),
+        ("taker_fee_pct", &row.taker_fee_pct),
+        ("maker_fee_pct", &row.maker_fee_pct),
+        ("fee_exponent", &row.fee_exponent),
         ("reward_pct", &row.reward_pct),
-        ("p_finished", &row.p_finished),
-        ("p_running", &row.p_running),
-        ("p_next", &row.p_next),
-        ("dist1", &row.dist1),
-        ("dist2", &row.dist2),
     ];
 
     for (key, value) in columns {
@@ -1069,7 +1430,9 @@ mod tests {
             bets_open: bets_open.map(|v| v.to_string()),
             in_interval: None,
             end_hhmm: None,
-            midprice: Some("0.5123456".to_string()),
+            ref_price: Some("0.4987654".to_string()),
+            price: Some("0.5123456".to_string()),
+            probability: Some("0.5123".to_string()),
             best_bid_yes: Some("0.51".to_string()),
             best_ask_yes: Some("0.5139".to_string()),
             position_net: Some("12.34567@0.498765@YES".to_string()),
@@ -1078,30 +1441,79 @@ mod tests {
             offer_yes: Some("2.34567@0.52".to_string()),
             offer_no: Some("3.33333@0.48".to_string()),
             net_profit: Some("0.123456".to_string()),
-            fee_pct: None,
+            taker_fee_pct: Some("0.25".to_string()),
+            maker_fee_pct: Some("-0.05".to_string()),
+            fee_exponent: Some("2".to_string()),
             reward_pct: Some("0.004567".to_string()),
-            p_finished: None,
-            p_running: Some("0.5123".to_string()),
-            p_next: Some("51.29".to_string()),
-            dist1: Some("(0.123456,1.2222,8.999,0)".to_string()),
-            dist2: Some("(0.0123456,1.9876,7.5555,0)".to_string()),
-            mock_columns: vec!["midprice".to_string()],
+            mock_columns: vec!["price".to_string()],
         }
     }
 
     #[test]
     fn header_order_and_column_count_are_exact() {
-        assert_eq!(DASHBOARD_HEADERS.len(), 22);
-        assert_eq!(DASHBOARD_COLUMN_KEYS.len(), 22);
+        assert_eq!(DASHBOARD_HEADERS.len(), 21);
+        assert_eq!(DASHBOARD_COLUMN_KEYS.len(), 21);
         assert_eq!(DASHBOARD_HEADERS[0], "Link");
-        assert_eq!(DASHBOARD_HEADERS[21], "dist2(mu,sigma,nu,lambda)");
+        assert_eq!(DASHBOARD_HEADERS[8], "Probability");
+        assert_eq!(DASHBOARD_HEADERS[20], "Reward %");
+    }
+
+    #[cfg(feature = "discovery-sdk")]
+    #[test]
+    fn fee_params_match_crypto_15_min_profile() {
+        let params = fee_params_from_type(Some("crypto_15_min"), Some(true), Duration::H1);
+        assert_eq!(params.taker_fee_pct, "0.25");
+        assert_eq!(params.maker_fee_pct, "-0.05");
+        assert_eq!(params.fee_exponent, "2");
+    }
+
+    #[cfg(feature = "discovery-sdk")]
+    #[test]
+    fn fee_params_default_when_fee_type_missing_or_disabled() {
+        let disabled = fee_params_from_type(Some("crypto_15_min"), Some(false), Duration::M15);
+        assert_eq!(disabled.taker_fee_pct, "0");
+        assert_eq!(disabled.maker_fee_pct, "0");
+        assert_eq!(disabled.fee_exponent, "-");
+    }
+
+    #[cfg(feature = "discovery-sdk")]
+    #[test]
+    fn fee_params_fallback_for_5m_and_15m_when_type_missing() {
+        let m5 = fee_params_from_type(None, Some(true), Duration::M5);
+        assert_eq!(m5.taker_fee_pct, "0.25");
+        assert_eq!(m5.maker_fee_pct, "-0.05");
+        assert_eq!(m5.fee_exponent, "2");
+
+        let m15 = fee_params_from_type(None, Some(true), Duration::M15);
+        assert_eq!(m15.taker_fee_pct, "0.25");
+        assert_eq!(m15.maker_fee_pct, "-0.05");
+        assert_eq!(m15.fee_exponent, "2");
+
+        let h1 = fee_params_from_type(None, Some(true), Duration::H1);
+        assert_eq!(h1.taker_fee_pct, "0");
+        assert_eq!(h1.maker_fee_pct, "0");
+        assert_eq!(h1.fee_exponent, "-");
+
+        let d1 = fee_params_from_type(None, Some(true), Duration::D1);
+        assert_eq!(d1.taker_fee_pct, "0");
+        assert_eq!(d1.maker_fee_pct, "0");
+        assert_eq!(d1.fee_exponent, "-");
+    }
+
+    #[cfg(feature = "discovery-sdk")]
+    #[test]
+    fn fee_params_no_type_and_fees_disabled_is_zero() {
+        let params = fee_params_from_type(None, Some(false), Duration::M5);
+        assert_eq!(params.taker_fee_pct, "0");
+        assert_eq!(params.maker_fee_pct, "0");
+        assert_eq!(params.fee_exponent, "-");
     }
 
     #[test]
     fn filter_defaults_select_all() {
         let filters = DashboardFilters::from_query(&DashboardQuery::default());
         assert_eq!(filters.coins.len(), 4);
-        assert_eq!(filters.durations.len(), 4);
+        assert_eq!(filters.durations.len(), 5);
         assert!(filters.bets_open_selected(BetsOpenFilter::Open));
         assert!(filters.bets_open_selected(BetsOpenFilter::Closed));
         assert!(filters.in_interval_selected(InIntervalFilter::Yes));
@@ -1145,13 +1557,14 @@ mod tests {
         let row = sample_row("BTC", "1h", 100, 200, Some("open"));
         let display = format_row_for_display(&row, 150);
 
-        assert_eq!(display.midprice, "0.5123");
+        assert_eq!(display.ref_price, "0.4988");
+        assert_eq!(display.price, "0.5123");
         assert_eq!(display.position_net, "12.35@0.4988@YES");
-        assert_eq!(display.fee_pct, "0");
+        assert_eq!(display.taker_fee_pct, "0.25");
+        assert_eq!(display.maker_fee_pct, "-0.05");
+        assert_eq!(display.fee_exponent, "2");
         assert_eq!(display.reward_pct, "0.00457");
-        assert_eq!(display.p_running, "51.2%");
-        assert_eq!(display.p_next, "51.3%");
-        assert_eq!(display.dist1, "(0.123,1.22,9,0)");
+        assert_eq!(display.probability, "51.2%");
     }
 
     #[test]
@@ -1163,8 +1576,13 @@ mod tests {
         assert_eq!(display.coin, "XRP");
         assert_eq!(display.duration, "15m");
         assert_eq!(display.bets_open, "-");
-        assert_eq!(display.midprice, "-");
-        assert!(display.mock_columns.contains(&"midprice".to_string()));
+        assert_eq!(display.ref_price, "-");
+        assert_eq!(display.price, "-");
+        assert_eq!(display.probability, "-");
+        assert_eq!(display.taker_fee_pct, "0");
+        assert_eq!(display.maker_fee_pct, "0");
+        assert_eq!(display.fee_exponent, "-");
+        assert!(display.mock_columns.contains(&"price".to_string()));
     }
 
     #[test]
@@ -1174,9 +1592,9 @@ mod tests {
     }
 
     #[test]
-    fn demo_snapshot_contains_48_rows() {
+    fn demo_snapshot_contains_60_rows() {
         let snapshot = demo_snapshot();
-        assert_eq!(snapshot.rows.len(), 48);
+        assert_eq!(snapshot.rows.len(), 60);
     }
 
     #[test]
@@ -1195,6 +1613,6 @@ mod tests {
         assert!(html.contains("market-btn"));
         assert!(html.contains("Open Market"));
         assert!(html.contains("cell-mock"));
-        assert!(html.contains("setInterval(refresh, 100)"));
+        assert!(html.contains("setInterval(refresh, 250)"));
     }
 }

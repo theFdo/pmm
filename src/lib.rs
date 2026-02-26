@@ -15,6 +15,8 @@ pub use dashboard::{
     DashboardSnapshot, DashboardSnapshotSource, InIntervalFilter, InMemoryMockSnapshotSource,
     DASHBOARD_HEADERS,
 };
+#[cfg(feature = "discovery-sdk")]
+pub use dashboard::{LiveDiscoveryConfig, LiveDiscoverySnapshotSource};
 pub use discovery::resolve_discovery_batch_with_fetcher;
 pub use discovery::{
     build_active_and_next_discovery_keys, build_active_discovery_keys,
