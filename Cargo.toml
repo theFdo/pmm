@@ -3,10 +3,17 @@ name = "pmm"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+discovery-sdk = ["dep:polymarket-client-sdk", "dep:tokio"]
+live-gamma-tests = ["discovery-sdk"]
+
 [dependencies]
 chrono = { version = "0.4", features = ["clock"] }
 chrono-tz = "0.10"
 thiserror = "1"
+polymarket-client-sdk = { version = "0.4.1", optional = true, default-features = false, features = ["gamma"] }
+tokio = { version = "1", optional = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 regex = "1"

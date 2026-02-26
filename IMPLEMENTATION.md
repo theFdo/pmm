@@ -88,3 +88,50 @@ Step 1 is complete only when all are true:
 - Slug generation module and public interface.
 - Unit + edge + deterministic sweep tests.
 - Short README note (or module docs) describing template and timezone behavior.
+
+---
+
+## Step 2 (Validation Scope): Discovery Resolution (SDK-first)
+
+This step converts section **6.1 / Step 2** from `FULL_SPEC.md` into a contained deliverable.
+
+### Objective
+Build and validate a discovery-resolution layer that:
+- resolves deterministic slugs through official Polymarket SDK metadata paths
+- keeps unresolved slugs visible as typed placeholders
+
+### Functional Requirements
+1. Add typed discovery entities:
+- `DiscoveryKey { coin, duration, end_ts_utc, slug }`
+- `DiscoveryRow<M> { key, status }`
+- `DiscoveryStatus<M> = Resolved { market } | Unresolved { reason }`
+- `UnresolvedReason = NotFound | TransportError(String)`
+
+2. Implement batch resolver behavior:
+- preserve input order
+- deduplicate slugs before fetch and re-expand afterwards
+- never drop unresolved rows
+
+3. Add SDK-backed live path:
+- `resolve_discovery_batch(keys, cfg)` under feature-gated SDK integration
+- retry + timeout behavior from explicit config
+
+### Validation Plan (must pass before Step 3)
+1. Unit tests:
+- order preserved after dedupe/re-expand
+- duplicate slugs fetched once
+- missing slug -> `Unresolved(NotFound)`
+- transport error -> `Unresolved(TransportError)`
+- output length equals input length
+
+2. Live integration test:
+- run against Gamma under feature flag
+- verify at least one resolved row and one guaranteed invalid unresolved row
+
+### Acceptance Criteria
+Step 2 is complete only when all are true:
+1. Discovery module resolves slug batches via official SDK path.
+2. Unresolved slugs are explicit typed rows.
+3. No unresolved row suppression is possible via resolver output.
+4. Unit tests for mapping logic pass.
+5. Live Gamma integration test is available and feature-gated.
