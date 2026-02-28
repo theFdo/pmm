@@ -24,6 +24,8 @@
 - nexus_update_dists()
     - Updates dists parameters for all coins, all durations
     - Calls pm_manager_eval_actions(trigger)
+- nexus_get_data(duration, coin)
+    - Returns data
 
 ## Module 1: Crypto Data
 - crypto_data_sync()
@@ -78,7 +80,7 @@
     - Executes decided actions if paper = False
 - pm_engine_report()
     - Reports on all market relevant data
-    - [All dashboard fields here]
+    - http link, coin, duration, bets_open, in_interval, end_time, ref_price, price, probability, best_bid_yes, best_ask_yes, position_net, pos_yes, pos_no, offer_yes, offer_no, net_profit taker_fee_pct, maker_fee_pct, fee_exponent, reward_pct
 
 ## Module 7: PM Manager
 - pm_manager_start()
