@@ -3,6 +3,7 @@
 ## Conventions
 - All times in seconds
 - All times ET
+- 4 significant digits max for reporting
 
 ## Structs
 - `dist_params`: ZeroMeanSkewStudentT dist params
@@ -109,6 +110,7 @@
 
 ## Module 6: PM Engine
 - One instance per market.
+- We only act on the yes market (the other is virtual)
 - pm_engine_start(id)
     - Instance start.
     - Connects to market websockets and maintains updated orderbook and market-local state.
@@ -118,18 +120,18 @@
     - if now > end: prob already defined
 - pm_engine_eval_action(shared_state)
     - Calculate fractional Kelly gain and sizing
-    - Execute action if thresholds pass
-    - Send multiorder (only if paper=False)
+    - If thresholds pass:
+        - Log orders
+        - Send multiorder (only if paper=False)
 - pm_engine_report()
     - Reports market relevant data for dashboard:
-    - link, coin, duration, bets_open, in_interval, end_time, ref_price, price, probability
-    - best_bid_yes, best_ask_yes, position_net, pos_yes, pos_no, offer_yes, offer_no
-    - net_profit, taker_fee_pct, maker_fee_pct, fee_exponent, reward_pct
+    - http link, coin, duration, bets_open, in_interval, start_time, end_time, ref_price, price, probability, best_bid, best_ask, own_combined_bid, own_combined_ask, yes_tokens, no_tokens, tokens_value, taker_fee_pct, maker_fee_pct, fee_exponent, reward_pct
+    - bids/asks: size@price
 
 ## Module 7: Manager
 - Owns `{price, ref_price, dist, extra_dist}` for every coin * duration.
 - manager_start()
-    - Finds current relevant markets and continually updates.
+    - Calculates current relevant markets and continually updates.
     - Uses `build_slug(coin,duration,end)` for discovery keys.
     - Starts and manages pm_engine instances for every market.
 - manager_update_price(coin, price)
@@ -150,5 +152,6 @@
 - Supports filters: coin, duration, bets_open, in_interval. All checkboxes lists.
 - Shows table `manager_markets_report()`.
 - Shows table `manager_dist_report()`.
+- Shows orders logs.
 - dashboard_run(filters)
     - Starts/keeps dashboard service running.
