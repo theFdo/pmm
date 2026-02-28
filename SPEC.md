@@ -1,11 +1,19 @@
 # SPEC
 
+## Conventions
+- All times in seconds
+- All times ET
+
 ## Structs
 - `dist_params`: ZeroMeanSkewStudentT dist params
 
 ## Parameters
 - `durations`: 5m, 15m, 1h, 4h, 1d
-- `symbols`: `["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT"]`
+- `symbols`:
+    - `{binance: BTCUSDT, pm_short: btc, pm_long: bitcoin}`
+    - `{binance: ETHUSDT, pm_short: eth, pm_long: ethereum}`
+    - `{binance: SOLUSDT, pm_short: sol, pm_long: solana}`
+    - `{binance: XRPUSDT, pm_short: xrp, pm_long: xrp}`
 - `history_start`: `2025-01-01T00:00:00Z`
 - `base_timestep`: 1s
 - `extra_timesteps`: [32s, 1024s]
@@ -26,6 +34,8 @@
 - `head_num_layers`
 - `head_dropout`
 - `inference_cadence`: 1s
+- `validation_split`
+- `density`
 - `optimizer`: AdamW
 - `learning_rate`
 - `weight_decay`
@@ -35,10 +45,19 @@
 - `gain_threshold`
 - `size_threshold`
 - `per_market_bankroll`
+- `dashboard_update`
 
 ## Helpers
 - calc_prob(dist, price, ref_price)
     - returns cumulative probability of dist for x=-returns_since_ref (log)
+- build_slug(coin, duration, start)
+    - patterns:
+        - 5m: `{pm_short}-updown-5m-{start_ts}`
+        - 15m: `{pm_short}-updown-15m-{start_ts}`
+        - 4h: `{pm_short}-updown-4h-{start_ts}`
+        - 1h: `{pm_long}-up-or-down-{month}-{day}-{hour12}{am_pm}-et`
+        - 1d: `{pm_long}-up-or-down-on-{month}-{day}`
+    - there is a market start every time: now mod duration = 0
 
 ## Module 1: Crypto Data
 - crypto_data_sync()
@@ -64,7 +83,7 @@
     - Loss: NLL on returns after horizon.
 - model_load(path)
     - Loads model artifact into memory.
-- model_predict(feature_sequence, horizons)
+- model_predict()
     - Returns `dist_params` for requested horizons.
 - model_save(path)
     - Persists current model artifact.
@@ -72,6 +91,8 @@
 ## Module 4: Model Trainer
 - model_trainer_run(train_start, train_end)
     - Builds training dataset from crypto_data_feature_sequence(end).
+    - Apply validation split and only use density % of input datapoints.
+    - Duration random, horizon random in 1..duration for any training input.
     - Trains model parameters.
     - Saves trained model with model_save(path).
 - model_trainer_eval(eval_start, eval_end)
@@ -109,6 +130,7 @@
 - Owns `{price, ref_price, dist, extra_dist}` for every coin * duration.
 - manager_start()
     - Finds current relevant markets and continually updates.
+    - Uses `build_slug(coin,duration,end)` for discovery keys.
     - Starts and manages pm_engine instances for every market.
 - manager_update_price(coin, price)
     - Updates shared price/ref_price state.
@@ -124,9 +146,9 @@
     - Report for variables
 
 ## Module 8: Dashboard
-- dashboard_start()
-    - Starts read-only dashboard service.
-- dashboard_snapshot()
-    - Builds table snapshot from manager report.
-- dashboard_render()
-    - Renders single-page table view.
+- Read-only module.
+- Supports filters: coin, duration, bets_open, in_interval. All checkboxes lists.
+- Shows table `manager_markets_report()`.
+- Shows table `manager_dist_report()`.
+- dashboard_run(filters)
+    - Starts/keeps dashboard service running.
