@@ -23,7 +23,7 @@
     - `volume`: normalized log volume
 - `features_per_timestep`:
     - `tow`: time-of-week encoded as `sin` + `cos`
-- `features_horizon`:
+- `features_horizon`: normalized to max horizon = 2 * max(durations)
     - `log`
     - `sqrt`
 - `normalization`: z-score (fit on train only)
@@ -49,7 +49,7 @@
 - `dashboard_update`
 
 ## Helpers
-- calc_prob(dist, price, ref_price)
+- calc_prob(return_dist, price, ref_price)
     - returns cumulative probability of dist for x=-returns_since_ref (log)
 - build_slug(coin, duration, start)
     - patterns:
@@ -85,7 +85,7 @@
 - model_load(path)
     - Loads model artifact into memory.
 - model_predict()
-    - Returns `dist_params` for requested horizons.
+    - Returns `dist_params`.
 - model_save(path)
     - Persists current model artifact.
 
@@ -102,11 +102,12 @@
 ## Module 5: Model Runner
 - model_runner_start()
     - Starts 1s inference loop.
-    - On each tick: calls crypto_data_feature_sequence(end).
-    - Calls model_predict(feature_sequence, horizons).
+- model_runner_tick()
+    - Calls crypto_data_feature_sequence(end).
+    - Calls model_predict() for all coins and durations
+        - horizon = end - now -> current_return_dist
+        - horizon = end - now + duration -> next_return_dist
     - Calls manager_update_dists() with inferred params.
-- model_runner_tick(end)
-    - Single inference step version of the same loop.
 
 ## Module 6: PM Engine
 - One instance per market.
@@ -115,8 +116,8 @@
     - Instance start.
     - Connects to market websockets and maintains updated orderbook and market-local state.
 - pm_calc_prob()
-    - If start <= now <= end: prob = calc_prob(dist)
-    - If now < start: prob = calc_prob(dist_extra) - calc_prob(dist)
+    - If start <= now <= end: prob = calc_prob(current_return_dist)
+    - If now < start: prob = calc_prob(next_return_dist) - calc_prob(current_return_dist)
     - if now > end: prob already defined
 - pm_engine_eval_action(shared_state)
     - Calculate fractional Kelly gain and sizing
@@ -129,16 +130,16 @@
     - bids/asks: size@price
 
 ## Module 7: Manager
-- Owns `{price, ref_price, dist, extra_dist}` for every coin * duration.
+- Owns `{price, ref_price, current_return_dist, next_return_dist}` for every coin * duration.
 - manager_start()
     - Calculates current relevant markets and continually updates.
-    - Uses `build_slug(coin,duration,end)` for discovery keys.
+    - Uses `build_slug(coin,duration,start)` for discovery keys.
     - Starts and manages pm_engine instances for every market.
 - manager_update_price(coin, price)
     - Updates shared price/ref_price state.
     - Calls manager_eval_actions(trigger).
 - manager_update_dists()
-    - Updates shared dist/extra_dist state for all coins and durations.
+    - Updates shared dist/next_return_dist state for all coins and durations.
     - Calls manager_eval_actions(trigger).
 - manager_eval_actions(trigger)
     - Runs `pm_engine_eval_action(...)` for managed market engines.
